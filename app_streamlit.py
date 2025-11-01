@@ -1,7 +1,9 @@
-# ---------------------------------------------
-# Agentra — Predictive Property Manager (Hardened)
-# Streamlit + Plotly | Robust to schema drift, dtype issues, and rolling/resample errors
-# ---------------------------------------------
+# app_streamlit.py
+# ---------------------------------------------------------
+# Agentra — Predictive Property Manager (Cloud-ready)
+# Streamlit + Plotly | File Uploader + Sample fallback
+# Robust to schema drift, dtype issues, and rolling/resample errors
+# ---------------------------------------------------------
 
 import os
 import math
@@ -11,7 +13,7 @@ import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
 
-# ============ Page ============
+# ============== Page config ==============
 st.set_page_config(page_title="Agentra — Predictive Property Manager", layout="wide")
 st.markdown(
     """
@@ -26,17 +28,17 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ============ Helpers: schema ============
+# ============== Column schema helpers ==============
 STANDARD_COLS = {
     # timestamps
-    "timestamp": ["timestamp", "time", "datetime", "date"],
+    "timestamp": ["timestamp","time","datetime","date"],
     # energy (Wh)
     "light_wh_base":  ["light_wh_base","light_wh_baseline","light_wh_b","energy_wh_base"],
     "light_wh_agent": ["light_wh_agent","light_wh_ai","light_wh_ag","energy_wh_agent","light_wh"],
-    # power (W) -> fallback to compute Wh
+    # power (W) -> fallback to Wh
     "light_w_base":  ["light_w_base","light_w_baseline","light_watts_base","light_w_b"],
     "light_w_agent": ["light_w_agent","light_w_ai","light_watts_agent"],
-    # pump
+    # pump sensing
     "pump_vib_rms_g": ["pump_vib_rms_g","pump_vibration_rms_g","pump_vib_g","vibration_g","vib_g","vibration","pump_vib_ms_g"],
     "pump_current_a": ["pump_current_a","current_a","pump_i"],
     "pump_temp_c":    ["pump_temp_c","pump_temperature_c","temp_c"],
@@ -70,6 +72,7 @@ def _normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def _ensure_timestamp(df: pd.DataFrame) -> pd.DataFrame:
+    """Ensure 'timestamp' exists and is parsed; raise friendly errors otherwise."""
     for c in STANDARD_COLS["timestamp"]:
         c = c.lower()
         if c in df.columns:
@@ -90,15 +93,16 @@ def _to_numeric(df: pd.DataFrame, cols) -> pd.DataFrame:
     return df
 
 def _infer_energy_from_power(df: pd.DataFrame) -> pd.DataFrame:
-    """If Wh columns are missing but power (W) exist, compute per-row Wh using delta time in hours."""
+    """
+    If Wh columns are missing but power (W) exist, compute per-row Wh using delta time (hours).
+    This keeps the app working even with power-only logs.
+    """
     df = df.copy()
     has_wh = ("light_wh_base" in df.columns) and ("light_wh_agent" in df.columns)
     has_w  = ("light_w_base" in df.columns) or ("light_w_agent" in df.columns)
-    if (not has_wh) and has_w:
-        # compute dt (hours) safely
+    if (not has_wh) and has_w and "timestamp" in df.columns:
         dt_h = df["timestamp"].diff().dt.total_seconds() / 3600.0
-        # fallback: fill 0/NaN with median cadence if available, else 1 minute
-        cadence = np.nanmedian(dt_h) if np.isfinite(np.nanmedian(dt_h)) else (1.0/60.0)
+        cadence = np.nanmedian(dt_h) if np.isfinite(np.nanmedian(dt_h)) else (1.0/60.0)  # default 1 minute
         dt_h = dt_h.replace(0, np.nan).fillna(cadence)
         if "light_w_base" in df.columns and "light_wh_base" not in df.columns:
             df["light_wh_base"]  = pd.to_numeric(df["light_w_base"],  errors="coerce") * dt_h
@@ -107,7 +111,10 @@ def _infer_energy_from_power(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def _rolling_stats_time(df: pd.DataFrame, value_col: str, window_minutes: int) -> pd.DataFrame:
-    """Time-based rolling mean/std using '<N>min' window. Robust to dtype/index issues."""
+    """
+    Time-based rolling mean/std using '<N>min' window.
+    Uses time index; falls back to fixed-size window if time-based fails.
+    """
     if value_col not in df.columns:
         return pd.DataFrame(columns=["timestamp", value_col, "roll_mean", "roll_std"])
     x = df[["timestamp", value_col]].copy()
@@ -122,19 +129,19 @@ def _rolling_stats_time(df: pd.DataFrame, value_col: str, window_minutes: int) -
         x["roll_mean"] = rm.mean()
         x["roll_std"]  = rm.std()
     except Exception:
-        # last-resort: fixed-size window (not time-based)
-        x["roll_mean"] = x[value_col].rolling(max(2, int(window_minutes))).mean()
-        x["roll_std"]  = x[value_col].rolling(max(2, int(window_minutes))).std()
+        # fixed-size fallback if needed
+        k = max(2, int(window_minutes))
+        x["roll_mean"] = x[value_col].rolling(k).mean()
+        x["roll_std"]  = x[value_col].rolling(k).std()
     x = x.reset_index()
     return x
 
 def _smart_resample(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     """
-    Robust resampling:
-      - 'light_wh*' columns: SUM (preserve energy totals)
-      - other numeric columns: MEAN
-      - non-numeric columns: FIRST
-    Only includes columns that exist to avoid agg errors.
+    Cloud-safe resampling:
+      - 'light_wh*' columns -> SUM (preserve totals)
+      - other numeric columns -> MEAN
+      - non-numeric columns -> FIRST
     """
     if rule == "OFF":
         out = df.copy()
@@ -142,30 +149,26 @@ def _smart_resample(df: pd.DataFrame, rule: str) -> pd.DataFrame:
         if "hour" not in out.columns: out["hour"] = out["timestamp"].dt.hour
         return out
 
-    # attempt to coerce typical numeric-like columns
     maybe_numeric = [
         "light_wh_base","light_wh_agent","light_w_base","light_w_agent",
         "pump_vib_rms_g","pump_current_a","pump_temp_c","anom_score","occ","lux"
     ]
     df = _to_numeric(df, maybe_numeric)
-
     num_cols = df.select_dtypes(include=["number"]).columns.tolist()
+
     agg = {}
     for c in df.columns:
-        if c == "timestamp":
+        if c == "timestamp": 
             continue
         if c in num_cols:
             agg[c] = "sum" if c.startswith("light_wh") else "mean"
         else:
             agg[c] = "first"
 
-    # keep only existing columns in agg
-    agg = {k: v for k, v in agg.items() if k in df.columns}
-
     out = (
         df.set_index("timestamp")
           .resample(rule)
-          .agg(agg)
+          .agg({k: v for k, v in agg.items() if k in df.columns})
           .reset_index()
     )
     out["day"]  = out["timestamp"].dt.date
@@ -176,56 +179,59 @@ def _safe_sum(df, col):
     return float(df[col].sum()) if col in df.columns and df[col].notna().any() else np.nan
 
 def _nice_int(x):
-    return f"{int(round(float(x))):,}" if (isinstance(x, (int, float, np.floating)) and math.isfinite(float(x))) else "—"
-
-def _load_optional_csv(path: str):
-    if not path or not os.path.exists(path):
-        return None
     try:
-        d = pd.read_csv(path)
-        d.columns = [c.strip().lower() for c in d.columns]
-        if "timestamp" in d.columns:
-            d["timestamp"] = pd.to_datetime(d["timestamp"], errors="coerce")
-        return d
+        xv = float(x)
+        return f"{int(round(xv)):,}" if math.isfinite(xv) else "—"
     except Exception:
-        return None
+        return "—"
 
-# ============ Sidebar ============
+# ============== Sidebar (Cloud-friendly inputs) ==============
 with st.sidebar:
-    st.header("Settings")
-    csv_path   = st.text_input("CSV file path", value="sim_property_riyadh_multi_saving15.csv")
-    audit_path = st.text_input("Agent audit log (optional)", value="")
-    use_range  = st.checkbox("Enable date range filter", value=False)
+    st.header("Data")
+    uploaded_csv = st.file_uploader("Upload CSV (preferred)", type=["csv"])
+    st.caption("If no file is uploaded, the app will try to load 'sample_data.csv' from the repo.")
+    use_range = st.checkbox("Enable date range filter", value=False)
 
     st.divider()
     st.subheader("Anomaly detection (fallback if no 'pred_anom')")
     roll_minutes = st.slider("Rolling window (minutes)", 10, 240, 60, step=10)
     z_thresh     = st.slider("Z-score threshold", 1.0, 6.0, 2.5, step=0.1)
     slope_thresh = st.slider("Slope threshold (Δg per hour)", 0.0, 2.0, 0.25, step=0.05)
-    st.caption("An anomaly is flagged if |Z| > threshold OR rolling slope exceeds threshold.")
+    st.caption("A point is anomalous if |Z| > threshold OR |slope| > threshold.")
 
     st.divider()
     st.subheader("Charts")
     resample_rule = st.selectbox("Resample (smoothing/aggregation)", ["OFF", "5min", "15min", "30min", "1H"], index=2)
 
-# ============ Load data ============
+# ============== Load data (Cloud-ready) ==============
 @st.cache_data(show_spinner=True)
-def load_data(path: str) -> pd.DataFrame:
-    df = pd.read_csv(path)
+def load_data(file) -> pd.DataFrame:
+    # 1) Prefer uploaded file from the UI
+    if file is not None:
+        df = pd.read_csv(file)
+    else:
+        # 2) Fallback to a bundled sample in the repo
+        sample_path = "sample_data.csv"  # <-- put a small CSV in the repo with this name
+        if os.path.exists(sample_path):
+            df = pd.read_csv(sample_path)
+        else:
+            raise FileNotFoundError(
+                "No CSV uploaded and 'sample_data.csv' not found in the repository."
+            )
+    # Normalize and ensure timestamp
     df = _normalize_cols(df)
     df = _ensure_timestamp(df)
+    # If only W columns exist, infer Wh
     df = _infer_energy_from_power(df)
     return df
 
 try:
-    df = load_data(csv_path)
+    df = load_data(uploaded_csv)
 except Exception as e:
-    st.error(f"Failed to load CSV: {e}")
+    st.error(f"Failed to load data: {e}")
     st.stop()
 
-audit_df = _load_optional_csv(audit_path)
-
-# ============ Optional date range ============
+# ============== Optional date range filter ==============
 if use_range:
     min_d = df["timestamp"].min().date()
     max_d = df["timestamp"].max().date()
@@ -242,12 +248,12 @@ if use_range:
         else:
             df = subset
 
-# ============ Derivatives & resample ============
+# ============== Derivatives & resample ==============
 df["day"]  = df["timestamp"].dt.date
 df["hour"] = df["timestamp"].dt.hour
 df = _smart_resample(df, resample_rule)
 
-# ============ Energy KPIs ============
+# ============== KPIs (Energy) ==============
 baseline_wh = _safe_sum(df, "light_wh_base")
 agent_wh    = _safe_sum(df, "light_wh_agent")
 if math.isfinite(baseline_wh) and baseline_wh > 0 and math.isfinite(agent_wh):
@@ -256,47 +262,43 @@ if math.isfinite(baseline_wh) and baseline_wh > 0 and math.isfinite(agent_wh):
 else:
     saved_wh, saved_pct = np.nan, 0.0
 
-# ============ Anomaly Detection ============
+# ============== Anomaly detection (pump vibration) ==============
 anom_df = pd.DataFrame()
 anomaly_count = 0
 
-# Prefer model output if available
+# Prefer model output if exists
 if "pred_anom" in df.columns and df["pred_anom"].astype(str).str.lower().isin(["1","true","yes"]).any():
     tmp = df[df["pred_anom"].astype(str).str.lower().isin(["1","true","yes"])].copy()
     ycol = "pump_vib_rms_g" if "pump_vib_rms_g" in tmp.columns else None
     keep = ["timestamp"]
     if ycol: keep.append(ycol)
-    for c in ("anom_score","pump_current_a","pump_temp_c"):
+    for c in ("anom_score","pump_current_a","pump_temp_c","severity","agent","action","target","decision_basis"):
         if c in tmp.columns: keep.append(c)
     anom_df = tmp[keep].copy()
-    # severity from score if possible
-    if "anom_score" in tmp.columns and tmp["anom_score"].notna().sum() >= 3:
-        anom_df["severity"] = pd.qcut(tmp["anom_score"].fillna(tmp["anom_score"].median()), q=3, labels=["medium","high","critical"])
-    else:
-        anom_df["severity"] = "high"
-    anom_df["agent"]  = "maintenance-agent"
-    anom_df["action"] = "OPEN_TICKET"
-    anom_df["target"] = "Pump-1"
-    if ycol:
-        anom_df["decision_basis"] = anom_df.apply(lambda r: f"pred_anom=1, vib={r[ycol]:.3f} g" if pd.notna(r.get(ycol, np.nan)) else "pred_anom=1", axis=1)
-    else:
-        anom_df["decision_basis"] = "pred_anom=1"
+    if "severity" not in anom_df.columns:
+        if "anom_score" in tmp.columns and tmp["anom_score"].notna().sum() >= 3:
+            anom_df["severity"] = pd.qcut(tmp["anom_score"].fillna(tmp["anom_score"].median()), q=3, labels=["medium","high","critical"])
+        else:
+            anom_df["severity"] = "high"
+    if "agent" not in anom_df.columns:  anom_df["agent"]  = "maintenance-agent"
+    if "action" not in anom_df.columns: anom_df["action"] = "OPEN_TICKET"
+    if "target" not in anom_df.columns: anom_df["target"] = "Pump-1"
+    if "decision_basis" not in anom_df.columns:
+        if ycol:
+            anom_df["decision_basis"] = anom_df.apply(lambda r: f"pred_anom=1, vib={r[ycol]:.3f} g" if pd.notna(r.get(ycol, np.nan)) else "pred_anom=1", axis=1)
+        else:
+            anom_df["decision_basis"] = "pred_anom=1"
     anomaly_count = len(anom_df)
 
-# Fallback heuristic if no pred_anom output
+# Heuristic fallback if no pred_anom
 if (anom_df is None or anom_df.empty) and "pump_vib_rms_g" in df.columns:
-    # rolling stats
     rs = _rolling_stats_time(df, "pump_vib_rms_g", int(roll_minutes))
     if not rs.empty:
-        # Z-score
         rs["z"] = (rs["pump_vib_rms_g"] - rs["roll_mean"]) / rs["roll_std"]
-        # slope ≈ Δ(roll_mean) / Δtime (hours)
         dt_h = pd.to_datetime(rs["timestamp"]).diff().dt.total_seconds() / 3600.0
         dt_h = dt_h.replace(0, np.nan)
         rs["slope"] = rs["roll_mean"].diff() / dt_h
         rs["slope"] = rs["slope"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
-
-        # decision
         rs["is_anom"] = (rs["z"].abs() > z_thresh) | (rs["slope"].abs() > slope_thresh)
         out = rs.loc[rs["is_anom"], ["timestamp","pump_vib_rms_g","z","slope"]].copy()
 
@@ -316,18 +318,7 @@ if (anom_df is None or anom_df.empty) and "pump_vib_rms_g" in df.columns:
             anom_df = out.copy()
             anomaly_count = len(anom_df)
 
-# Merge optional audit log
-if audit_df is not None and not audit_df.empty:
-    keep = [c for c in ["timestamp","agent","action","target","severity","decision_basis"] if c in audit_df.columns]
-    if keep:
-        merged = audit_df[keep].copy()
-        if anom_df is not None and not anom_df.empty and all(k in anom_df.columns for k in keep):
-            anom_df = pd.concat([anom_df[keep], merged], ignore_index=True).drop_duplicates()
-        else:
-            anom_df = merged
-        anomaly_count = len(anom_df)
-
-# ============ Tabs ============
+# ============== Tabs ==============
 tab_overview, tab_pump, tab_light, tab_agent = st.tabs(["Overview", "Pump Monitoring", "Lighting", "Agent Insights"])
 
 # ---- Overview ----
@@ -380,14 +371,12 @@ with tab_pump:
         except Exception:
             st.warning("Could not plot pump vibration line chart.")
 
-        # Rolling average display
         rs = _rolling_stats_time(df, "pump_vib_rms_g", int(roll_minutes))
         if not rs.empty and rs["roll_mean"].notna().any():
             st.markdown(f"#### Rolling Average of Vibration (window={roll_minutes} min)")
             st.plotly_chart(px.line(rs, x="timestamp", y="roll_mean", labels={"roll_mean": "roll_mean (g)"}),
                             use_container_width=True)
 
-        # anomalies points
         if anom_df is not None and not anom_df.empty:
             st.markdown("#### Detected Anomalies")
             ycol = "pump_vib_rms_g" if "pump_vib_rms_g" in anom_df.columns else None
@@ -418,8 +407,7 @@ with tab_light:
         except Exception:
             st.caption("Could not compute hourly average.")
     else:
-        st.info("Expected lighting energy columns 'light_wh_base' & 'light_wh_agent' not found. "
-                "If only W columns exist, they were auto-converted to Wh when possible.")
+        st.info("Expected 'light_wh_base' & 'light_wh_agent'. If only W columns exist, they were auto-converted to Wh when possible.")
 
 # ---- Agent Insights ----
 with tab_agent:
@@ -434,7 +422,6 @@ with tab_agent:
         except Exception:
             st.dataframe(anom_df, use_container_width=True, height=360)
 
-        # Severity distribution
         if "severity" in anom_df.columns:
             try:
                 sev_cnt = anom_df.groupby(["severity"], as_index=False).size()
@@ -443,7 +430,7 @@ with tab_agent:
             except Exception:
                 st.caption("Could not compute severity distribution.")
     else:
-        st.info("No agent actions logged yet (no anomalies with current thresholds or audit file).")
+        st.info("No agent actions logged yet (no anomalies with current thresholds or model output).")
 
 st.markdown(
     """
