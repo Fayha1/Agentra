@@ -344,10 +344,18 @@ with tabs[1]:
     with b:
         if PLOTLY:
             fig = make_subplots(specs=[[{"secondary_y": True}]])
-            fig.add_trace(go.Scatter(x=pumps["timestamp"], y=pumps["current_a"], name="Current (A)",
-                                     mode="lines+markers", line=dict(width=3), marker=dict(size=5))), secondary_y=False)
-            fig.add_trace(go.Scatter(x=pumps["timestamp"], y=pumps["power_kw"], name="Power (kW)",
-                                     mode="lines+markers", line=dict(width=3), marker=dict(size=5)), secondary_y=True)
+            fig.add_trace(
+    go.Scatter(
+        x=pumps["timestamp"],
+        y=pumps["current_a"],
+        name="Current (A)",
+        mode="lines+markers",
+        line=dict(width=3),
+        marker=dict(size=5)
+    ),
+    secondary_y=False
+)
+
             fig.update_yaxes(title_text="Current (A)", secondary_y=False)
             fig.update_yaxes(title_text="Power (kW)", secondary_y=True)
             _plotly_layout(fig, h=320)
