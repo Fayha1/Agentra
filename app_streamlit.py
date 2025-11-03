@@ -1,443 +1,627 @@
 # app_streamlit.py
-# ---------------------------------------------------------
-# Agentra — Predictive Property Manager (Cloud-ready)
-# Streamlit + Plotly | File Uploader + Sample fallback
-# Robust to schema drift, dtype issues, and rolling/resample errors
-# ---------------------------------------------------------
+# -----------------------------------------
+# Agentra - Predictive Property Manager (Streamlit)
+# Tabs: Overview, Pump Monitoring, Lighting, Agent Insights
+# Data: sim_property_riyadh_multi.csv, sim_property_riyadh_multi_saving15.csv,
+#       sim_pump_riyadh.csv, agent_audit_log.csv
+# Logo: assets/FullLogo_Transparent.png
+# -----------------------------------------
 
+from __future__ import annotations
 import os
-import math
+import pathlib
+from datetime import datetime, timedelta
+
 import numpy as np
 import pandas as pd
 import streamlit as st
+from PIL import Image
+
 import plotly.express as px
 import plotly.graph_objects as go
 
-# ============== Page config ==============
-st.set_page_config(page_title="Agentra — Predictive Property Manager", layout="wide")
+# -------------------------
+# Config & Theme
+# -------------------------
+st.set_page_config(
+    page_title="Agentra – Predictive Property Manager",
+    page_icon="🧠",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# Inject dark styling aligned with brand
 st.markdown(
     """
-    <div style="text-align:center; margin-top:8px; margin-bottom:4px">
-        <h1 style="font-size:40px; margin:0">Agentra — Predictive Property Manager</h1>
-        <div style="opacity:.8; margin-top:6px">
-            AI for predictive maintenance & energy optimization
-        </div>
-    </div>
-    <hr style="margin:12px 0"/>
+    <style>
+        :root {
+          --brand:#27E36A;   /* اللمسة الخضراء */
+          --bg:#0B0B0B;
+          --panel:#121418;
+          --muted:#B9C0CC;
+          --danger:#FF4D4F;
+          --warn:#FFA500;
+          --ok:#27E36A;
+        }
+        body { background-color: var(--bg); }
+        [data-testid="stAppViewContainer"] { background-color: var(--bg); }
+        [data-testid="stSidebar"] { background: #000; border-right: 1px solid #1C1F26; }
+        .stMetric label, .stMarkdown, .stText, .stNumberInput, .stDateInput, .stCheckbox, .stSelectbox, .stSlider {
+          color: #E6E8EE !important;
+        }
+        h1,h2,h3,h4,h5,h6 { color:#E6FFE6; }
+        .kpi-card {
+            background: var(--panel);
+            padding: 16px 18px;
+            border-radius: 14px;
+            border: 1px solid #1C1F26;
+        }
+        .section {
+            background: var(--panel);
+            padding: 14px 16px;
+            border-radius: 14px;
+            border: 1px solid #1C1F26;
+        }
+        .pill {
+            display:inline-block;
+            padding: 2px 10px;
+            border-radius:999px;
+            font-size: 12px;
+            margin-left:6px;
+        }
+        .pill.ok{ background:rgba(39,227,106,0.15); color:#7CFFA9; }
+        .pill.warn{ background:rgba(255,165,0,0.15); color:#FFC879; }
+        .pill.danger{ background:rgba(255,77,79,0.15); color:#FFA7A8; }
+        .muted { color: var(--muted); font-size: 12px; }
+    </style>
     """,
     unsafe_allow_html=True,
 )
 
-# ============== Column schema helpers ==============
-STANDARD_COLS = {
-    # timestamps
-    "timestamp": ["timestamp","time","datetime","date"],
-    # energy (Wh)
-    "light_wh_base":  ["light_wh_base","light_wh_baseline","light_wh_b","energy_wh_base"],
-    "light_wh_agent": ["light_wh_agent","light_wh_ai","light_wh_ag","energy_wh_agent","light_wh"],
-    # power (W) -> fallback to Wh
-    "light_w_base":  ["light_w_base","light_w_baseline","light_watts_base","light_w_b"],
-    "light_w_agent": ["light_w_agent","light_w_ai","light_watts_agent"],
-    # pump sensing
-    "pump_vib_rms_g": ["pump_vib_rms_g","pump_vibration_rms_g","pump_vib_g","vibration_g","vib_g","vibration","pump_vib_ms_g"],
-    "pump_current_a": ["pump_current_a","current_a","pump_i"],
-    "pump_temp_c":    ["pump_temp_c","pump_temperature_c","temp_c"],
-    # labels / model outputs
-    "status":        ["status"],
-    "anomaly_label": ["anomaly_label","label"],
-    "pred_anom":     ["pred_anom","pred_anomaly","is_anom","predicted_anomaly"],
-    "anom_score":    ["anom_score","anomaly_score","score"],
-    # lighting context
-    "occ": ["occ","occupancy"],
-    "lux": ["lux","illuminance_lux"],
-    # convenience
-    "day":  ["day","day_index"],
-    "hour": ["hour"],
-}
+# -------------------------
+# Paths & Helpers
+# -------------------------
+ROOT = pathlib.Path(__file__).parent
+ASSETS = ROOT / "assets"
+LOGO_PATH = ASSETS / "FullLogo_Transparent.png"
 
-def _find_first(cols, candidates):
-    cl = [c.lower() for c in cols]
-    for c in candidates:
-        if c.lower() in cl:
-            return c.lower()
-    return None
+DATA_PROPERTY = ROOT / "sim_property_riyadh_multi.csv"
+DATA_PROPERTY_SAVING = ROOT / "sim_property_riyadh_multi_saving15.csv"
+DATA_PUMP = ROOT / "sim_pump_riyadh.csv"
+DATA_AGENT_LOG = ROOT / "agent_audit_log.csv"
 
-def _normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df.columns = [c.strip().lower() for c in df.columns]
-    for std, variants in STANDARD_COLS.items():
-        found = _find_first(df.columns, variants)
-        if found and found != std and std not in df.columns:
-            df = df.rename(columns={found: std})
-    return df
 
-def _ensure_timestamp(df: pd.DataFrame) -> pd.DataFrame:
-    """Ensure 'timestamp' exists and is parsed; raise friendly errors otherwise."""
-    for c in STANDARD_COLS["timestamp"]:
-        c = c.lower()
-        if c in df.columns:
-            df["timestamp"] = pd.to_datetime(df[c], errors="coerce")
-            break
-    if "timestamp" not in df.columns:
-        raise ValueError("CSV must include a timestamp column (e.g., 'timestamp'/'time'/'datetime').")
-    if df["timestamp"].isna().all():
-        raise ValueError("Failed to parse any timestamps. Please check the date format.")
-    df = df.sort_values("timestamp").reset_index(drop=True)
-    return df
+@st.cache_data(show_spinner=False)
+def load_csv(path: pathlib.Path, parse_dates: list[str] | None = None) -> pd.DataFrame:
+    if path.exists():
+        try:
+            df = pd.read_csv(path)
+            if parse_dates:
+                for c in parse_dates:
+                    if c in df.columns:
+                        df[c] = pd.to_datetime(df[c], errors="coerce")
+            return df
+        except Exception as e:
+            st.warning(f"تعذّر قراءة الملف: {path.name} ({e}). سيتم توليد بيانات بديلة.")
+    return pd.DataFrame()
 
-def _to_numeric(df: pd.DataFrame, cols) -> pd.DataFrame:
-    df = df.copy()
-    for c in cols:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
-    return df
 
-def _infer_energy_from_power(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    If Wh columns are missing but power (W) exist, compute per-row Wh using delta time (hours).
-    This keeps the app working even with power-only logs.
-    """
-    df = df.copy()
-    has_wh = ("light_wh_base" in df.columns) and ("light_wh_agent" in df.columns)
-    has_w  = ("light_w_base" in df.columns) or ("light_w_agent" in df.columns)
-    if (not has_wh) and has_w and "timestamp" in df.columns:
-        dt_h = df["timestamp"].diff().dt.total_seconds() / 3600.0
-        cadence = np.nanmedian(dt_h) if np.isfinite(np.nanmedian(dt_h)) else (1.0/60.0)  # default 1 minute
-        dt_h = dt_h.replace(0, np.nan).fillna(cadence)
-        if "light_w_base" in df.columns and "light_wh_base" not in df.columns:
-            df["light_wh_base"]  = pd.to_numeric(df["light_w_base"],  errors="coerce") * dt_h
-        if "light_w_agent" in df.columns and "light_wh_agent" not in df.columns:
-            df["light_wh_agent"] = pd.to_numeric(df["light_w_agent"], errors="coerce") * dt_h
-    return df
-
-def _rolling_stats_time(df: pd.DataFrame, value_col: str, window_minutes: int) -> pd.DataFrame:
-    """
-    Time-based rolling mean/std using '<N>min' window.
-    Uses time index; falls back to fixed-size window if time-based fails.
-    """
-    if value_col not in df.columns:
-        return pd.DataFrame(columns=["timestamp", value_col, "roll_mean", "roll_std"])
-    x = df[["timestamp", value_col]].copy()
-    x["timestamp"] = pd.to_datetime(x["timestamp"], errors="coerce")
-    x[value_col]   = pd.to_numeric(x[value_col], errors="coerce")
-    x = x.dropna(subset=["timestamp", value_col]).sort_values("timestamp")
-    if x.empty:
-        return pd.DataFrame(columns=["timestamp", value_col, "roll_mean", "roll_std"])
-    x = x.set_index("timestamp")
-    try:
-        rm = x[value_col].rolling(f"{int(window_minutes)}min")
-        x["roll_mean"] = rm.mean()
-        x["roll_std"]  = rm.std()
-    except Exception:
-        # fixed-size fallback if needed
-        k = max(2, int(window_minutes))
-        x["roll_mean"] = x[value_col].rolling(k).mean()
-        x["roll_std"]  = x[value_col].rolling(k).std()
-    x = x.reset_index()
-    return x
-
-def _smart_resample(df: pd.DataFrame, rule: str) -> pd.DataFrame:
-    """
-    Cloud-safe resampling:
-      - 'light_wh*' columns -> SUM (preserve totals)
-      - other numeric columns -> MEAN
-      - non-numeric columns -> FIRST
-    """
-    if rule == "OFF":
-        out = df.copy()
-        if "day" not in out.columns:  out["day"]  = out["timestamp"].dt.date
-        if "hour" not in out.columns: out["hour"] = out["timestamp"].dt.hour
-        return out
-
-    maybe_numeric = [
-        "light_wh_base","light_wh_agent","light_w_base","light_w_agent",
-        "pump_vib_rms_g","pump_current_a","pump_temp_c","anom_score","occ","lux"
-    ]
-    df = _to_numeric(df, maybe_numeric)
-    num_cols = df.select_dtypes(include=["number"]).columns.tolist()
-
-    agg = {}
-    for c in df.columns:
-        if c == "timestamp": 
-            continue
-        if c in num_cols:
-            agg[c] = "sum" if c.startswith("light_wh") else "mean"
-        else:
-            agg[c] = "first"
-
-    out = (
-        df.set_index("timestamp")
-          .resample(rule)
-          .agg({k: v for k, v in agg.items() if k in df.columns})
-          .reset_index()
+def fake_property_data(n_days: int = 7) -> pd.DataFrame:
+    now = datetime.now().replace(minute=0, second=0, microsecond=0)
+    idx = pd.date_range(now - timedelta(days=n_days-1), periods=n_days, freq="D")
+    base = np.random.randint(2500, 3200, size=n_days)  # kWh baseline
+    optimized = (base * np.random.uniform(0.7, 0.9, size=n_days)).astype(int)
+    saved = base - optimized
+    eff = np.clip(np.random.normal(0.82, 0.05, n_days), 0.55, 0.98)
+    temp = np.clip(np.random.normal(26, 3, n_days), 18, 40)
+    vibr = np.clip(np.random.normal(2.0, 0.4, n_days), 1.0, 3.8)
+    return pd.DataFrame(
+        {
+            "timestamp": idx,
+            "baseline_kwh": base,
+            "optimized_kwh": optimized,
+            "saved_kwh": saved,
+            "efficiency": eff,
+            "temperature_c": temp,
+            "vibration_mm_s": vibr,
+        }
     )
-    out["day"]  = out["timestamp"].dt.date
-    out["hour"] = out["timestamp"].dt.hour
-    return out
 
-def _safe_sum(df, col):
-    return float(df[col].sum()) if col in df.columns and df[col].notna().any() else np.nan
 
-def _nice_int(x):
-    try:
-        xv = float(x)
-        return f"{int(round(xv)):,}" if math.isfinite(xv) else "—"
-    except Exception:
-        return "—"
+def fake_pump_data(n_hours: int = 24) -> pd.DataFrame:
+    now = datetime.now().replace(minute=0, second=0, microsecond=0)
+    idx = pd.date_range(now - timedelta(hours=n_hours - 1), periods=n_hours, freq="H")
+    curr = np.clip(np.random.normal(4.5, 0.4, n_hours), 3.8, 5.2)  # Amps
+    power = np.clip(curr * np.random.uniform(0.45, 0.55, n_hours), 1.8, 2.6)  # kW
+    vib = np.clip(np.random.normal(1.8, 0.5, n_hours), 0.8, 3.6)  # mm/s
+    temp = np.clip(np.random.normal(48, 4, n_hours), 36, 65)  # °C
+    eff = np.clip(np.random.normal(0.84, 0.07, n_hours), 0.55, 0.98)
+    return pd.DataFrame(
+        {
+            "timestamp": idx,
+            "current_a": curr,
+            "power_kw": power,
+            "vibration_mm_s": vib,
+            "temperature_c": temp,
+            "efficiency": eff,
+        }
+    )
 
-# ============== Sidebar (Cloud-friendly inputs) ==============
-with st.sidebar:
-    st.header("Data")
-    uploaded_csv = st.file_uploader("Upload CSV (preferred)", type=["csv"])
-    st.caption("If no file is uploaded, the app will try to load 'sample_data.csv' from the repo.")
-    use_range = st.checkbox("Enable date range filter", value=False)
 
-    st.divider()
-    st.subheader("Anomaly detection (fallback if no 'pred_anom')")
-    roll_minutes = st.slider("Rolling window (minutes)", 10, 240, 60, step=10)
-    z_thresh     = st.slider("Z-score threshold", 1.0, 6.0, 2.5, step=0.1)
-    slope_thresh = st.slider("Slope threshold (Δg per hour)", 0.0, 2.0, 0.25, step=0.05)
-    st.caption("A point is anomalous if |Z| > threshold OR |slope| > threshold.")
+def fake_agent_log(n: int = 50) -> pd.DataFrame:
+    rng = np.random.default_rng(42)
+    base_time = datetime.now() - timedelta(hours=12)
+    agents = ["HVAC Agent", "Lighting Agent", "Pump Agent"]
+    actions = ["Temperature Adjustment", "Brightness Optimization", "Speed Optimization", "Anomaly Detection", "Schedule Override"]
+    severity_vals = ["Low", "Medium", "High", "Critical"]
+    decision_vals = ["Optimized", "Applied", "Resolved", "Monitoring", "Executed", "Pending", "Reduced by 3°C", "Schedule Maintenance", "Optimize Schedule"]
+    rows = []
+    for i in range(n):
+        rows.append(
+            {
+                "timestamp": base_time + timedelta(minutes=15*i),
+                "agent": rng.choice(agents),
+                "action": rng.choice(actions),
+                "target": rng.choice(["Zone A-203", "Pump-001", "Floor 2 East", "Building Wide", "Conference Room A"]),
+                "severity": rng.choice(severity_vals, p=[0.35, 0.33, 0.22, 0.10]),
+                "decision": rng.choice(decision_vals),
+                "status": rng.choice(["Completed", "Pending", "In-Progress"]),
+            }
+        )
+    return pd.DataFrame(rows)
 
-    st.divider()
-    st.subheader("Charts")
-    resample_rule = st.selectbox("Resample (smoothing/aggregation)", ["OFF", "5min", "15min", "30min", "1H"], index=2)
 
-# ============== Load data (Cloud-ready) ==============
-@st.cache_data(show_spinner=True)
-def load_data(file) -> pd.DataFrame:
-    # 1) Prefer uploaded file from the UI
-    if file is not None:
-        df = pd.read_csv(file)
-    else:
-        # 2) Fallback to a bundled sample in the repo
-        sample_path = "sample_data.csv"  # <-- put a small CSV in the repo with this name
-        if os.path.exists(sample_path):
-            df = pd.read_csv(sample_path)
-        else:
-            raise FileNotFoundError(
-                "No CSV uploaded and 'sample_data.csv' not found in the repository."
-            )
-    # Normalize and ensure timestamp
-    df = _normalize_cols(df)
-    df = _ensure_timestamp(df)
-    # If only W columns exist, infer Wh
-    df = _infer_energy_from_power(df)
+def coalesce(df: pd.DataFrame, fallback: pd.DataFrame) -> pd.DataFrame:
+    return df if not df.empty else fallback
+
+
+# -------------------------
+# Load data
+# -------------------------
+property_df = load_csv(DATA_PROPERTY, parse_dates=["timestamp"])
+property_saving_df = load_csv(DATA_PROPERTY_SAVING, parse_dates=["timestamp"])
+pump_df = load_csv(DATA_PUMP, parse_dates=["timestamp"])
+agent_df = load_csv(DATA_AGENT_LOG, parse_dates=["timestamp"])
+
+property_df = coalesce(property_df, fake_property_data(14))
+property_saving_df = coalesce(property_saving_df, property_df.copy())
+pump_df = coalesce(pump_df, fake_pump_data(48))
+agent_df = coalesce(agent_df, fake_agent_log(120))
+
+# Normalize columns if needed
+def safe_col(df: pd.DataFrame, name: str, default):
+    if name not in df.columns:
+        df[name] = default
     return df
 
-try:
-    df = load_data(uploaded_csv)
-except Exception as e:
-    st.error(f"Failed to load data: {e}")
-    st.stop()
+for df in [property_df, property_saving_df]:
+    df = safe_col(df, "baseline_kwh", np.random.randint(2500, 3200))
+    df = safe_col(df, "optimized_kwh", df["baseline_kwh"] * 0.8)
+    df = safe_col(df, "saved_kwh", df["baseline_kwh"] - df["optimized_kwh"])
+    df = safe_col(df, "efficiency", 0.8)
 
-# ============== Optional date range filter ==============
-if use_range:
-    min_d = df["timestamp"].min().date()
-    max_d = df["timestamp"].max().date()
-    c1, c2 = st.columns(2)
-    start = c1.date_input("Start date", min_d, min_value=min_d, max_value=max_d)
-    end   = c2.date_input("End date", max_d, min_value=min_d, max_value=max_d)
-    if start > end:
-        st.warning("Start date must be before end date.")
-    else:
-        mask = (df["timestamp"].dt.date >= start) & (df["timestamp"].dt.date <= end)
-        subset = df.loc[mask]
-        if subset.empty:
-            st.info("No data for the selected date range — showing full dataset.")
-        else:
-            df = subset
+pump_df = safe_col(pump_df, "efficiency", 0.82)
+pump_df = safe_col(pump_df, "vibration_mm_s", 1.8)
+pump_df = safe_col(pump_df, "temperature_c", 48.0)
+pump_df = safe_col(pump_df, "current_a", 4.5)
+pump_df = safe_col(pump_df, "power_kw", 2.2)
 
-# ============== Derivatives & resample ==============
-df["day"]  = df["timestamp"].dt.date
-df["hour"] = df["timestamp"].dt.hour
-df = _smart_resample(df, resample_rule)
+# -------------------------
+# Sidebar: Logo & Controls
+# -------------------------
+if LOGO_PATH.exists():
+    try:
+        logo_img = Image.open(LOGO_PATH)
+        st.sidebar.image(logo_img, caption="", use_column_width=True)
+    except Exception:
+        st.sidebar.markdown("### Agentra")
 
-# ============== KPIs (Energy) ==============
-baseline_wh = _safe_sum(df, "light_wh_base")
-agent_wh    = _safe_sum(df, "light_wh_agent")
-if math.isfinite(baseline_wh) and baseline_wh > 0 and math.isfinite(agent_wh):
-    saved_wh  = baseline_wh - agent_wh
-    saved_pct = max(0.0, (saved_wh / baseline_wh) * 100.0)
-else:
-    saved_wh, saved_pct = np.nan, 0.0
+st.sidebar.markdown("#### Data Source")
+data_source = st.sidebar.selectbox(
+    "Select data source",
+    ["Real-Time Sensors", "Historical Data", "Predictive Model"],
+    index=0,
+)
 
-# ============== Anomaly detection (pump vibration) ==============
-anom_df = pd.DataFrame()
-anomaly_count = 0
+st.sidebar.markdown("#### Anomaly Thresholds")
+z_score = st.sidebar.slider("Z-Score Sensitivity", 1.0, 5.0, 2.5, 0.1)
+slope_sens = st.sidebar.slider("Slope Sensitivity", 0.1, 2.0, 0.8, 0.1)
 
-# Prefer model output if exists
-if "pred_anom" in df.columns and df["pred_anom"].astype(str).str.lower().isin(["1","true","yes"]).any():
-    tmp = df[df["pred_anom"].astype(str).str.lower().isin(["1","true","yes"])].copy()
-    ycol = "pump_vib_rms_g" if "pump_vib_rms_g" in tmp.columns else None
-    keep = ["timestamp"]
-    if ycol: keep.append(ycol)
-    for c in ("anom_score","pump_current_a","pump_temp_c","severity","agent","action","target","decision_basis"):
-        if c in tmp.columns: keep.append(c)
-    anom_df = tmp[keep].copy()
-    if "severity" not in anom_df.columns:
-        if "anom_score" in tmp.columns and tmp["anom_score"].notna().sum() >= 3:
-            anom_df["severity"] = pd.qcut(tmp["anom_score"].fillna(tmp["anom_score"].median()), q=3, labels=["medium","high","critical"])
-        else:
-            anom_df["severity"] = "high"
-    if "agent" not in anom_df.columns:  anom_df["agent"]  = "maintenance-agent"
-    if "action" not in anom_df.columns: anom_df["action"] = "OPEN_TICKET"
-    if "target" not in anom_df.columns: anom_df["target"] = "Pump-1"
-    if "decision_basis" not in anom_df.columns:
-        if ycol:
-            anom_df["decision_basis"] = anom_df.apply(lambda r: f"pred_anom=1, vib={r[ycol]:.3f} g" if pd.notna(r.get(ycol, np.nan)) else "pred_anom=1", axis=1)
-        else:
-            anom_df["decision_basis"] = "pred_anom=1"
-    anomaly_count = len(anom_df)
+st.sidebar.markdown("#### Date Range")
+start_date = st.sidebar.date_input("From", value=(datetime.now() - timedelta(days=6)).date())
+end_date = st.sidebar.date_input("To", value=datetime.now().date())
 
-# Heuristic fallback if no pred_anom
-if (anom_df is None or anom_df.empty) and "pump_vib_rms_g" in df.columns:
-    rs = _rolling_stats_time(df, "pump_vib_rms_g", int(roll_minutes))
-    if not rs.empty:
-        rs["z"] = (rs["pump_vib_rms_g"] - rs["roll_mean"]) / rs["roll_std"]
-        dt_h = pd.to_datetime(rs["timestamp"]).diff().dt.total_seconds() / 3600.0
-        dt_h = dt_h.replace(0, np.nan)
-        rs["slope"] = rs["roll_mean"].diff() / dt_h
-        rs["slope"] = rs["slope"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
-        rs["is_anom"] = (rs["z"].abs() > z_thresh) | (rs["slope"].abs() > slope_thresh)
-        out = rs.loc[rs["is_anom"], ["timestamp","pump_vib_rms_g","z","slope"]].copy()
+st.sidebar.markdown("---")
+st.sidebar.markdown(
+    '<span class="muted">© 2025 Agentra • Streamlit + Plotly</span>',
+    unsafe_allow_html=True,
+)
 
-        def _sev(row):
-            if (pd.notna(row.get("z")) and abs(row["z"]) >= z_thresh + 1.5) or (pd.notna(row.get("slope")) and abs(row["slope"]) >= slope_thresh*2):
-                return "critical"
-            if (pd.notna(row.get("z")) and abs(row["z"]) >= z_thresh + 0.5) or (pd.notna(row.get("slope")) and abs(row["slope"]) >= slope_thresh*1.2):
-                return "high"
-            return "medium"
+# Filter data by range
+def filter_by_date(df: pd.DataFrame, start, end):
+    if "timestamp" not in df.columns:
+        return df
+    mask = (df["timestamp"].dt.date >= start) & (df["timestamp"].dt.date <= end)
+    return df.loc[mask].reset_index(drop=True)
 
-        if not out.empty:
-            out["severity"] = out.apply(_sev, axis=1)
-            out["agent"]  = "maintenance-agent"
-            out["action"] = "OPEN_TICKET"
-            out["target"] = "Pump-1"
-            out["decision_basis"] = out.apply(lambda r: f"z={r['z']:.2f}, slope={r['slope']:.2f}, vib={r['pump_vib_rms_g']:.3f} g", axis=1)
-            anom_df = out.copy()
-            anomaly_count = len(anom_df)
+property_view = filter_by_date(property_df.copy(), start_date, end_date)
+saving_view = filter_by_date(property_saving_df.copy(), start_date, end_date)
+pump_view = filter_by_date(pump_df.copy(), start_date, end_date)
+agent_view = filter_by_date(agent_df.copy(), start_date, end_date)
 
-# ============== Tabs ==============
-tab_overview, tab_pump, tab_light, tab_agent = st.tabs(["Overview", "Pump Monitoring", "Lighting", "Agent Insights"])
+# -------------------------
+# Reusable visuals
+# -------------------------
+def kpi_card(label: str, value: str, sublabel: str | None = None, color: str = "ok"):
+    pill = f'<span class="pill {color}">{sublabel}</span>' if sublabel else ""
+    st.markdown(
+        f"""
+        <div class="kpi-card">
+            <div style="color:#9CA3AF; font-size:12px;">{label}</div>
+            <div style="font-size:28px; font-weight:700; color:#FFFFFF; margin:4px 0 6px 0;">{value}</div>
+            <div>{pill}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-# ---- Overview ----
-with tab_overview:
-    st.subheader("Key Performance Indicators")
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Baseline Energy (Wh)", _nice_int(baseline_wh))
-    k2.metric("Agent Energy (Wh)", _nice_int(agent_wh))
-    k3.metric("Energy Saved (%)", f"{saved_pct:.2f}%")
-    k4.metric("Anomalies Detected", f"{anomaly_count}")
-
-    st.markdown("### Overall Energy Saving Gauge")
-    gval = max(0.0, min(25.0, saved_pct))
-    fig_g = go.Figure(
+def gauge(title: str, val: float, suffix: str = "%", min_v: float = 0, max_v: float = 100):
+    fig = go.Figure(
         go.Indicator(
             mode="gauge+number",
-            value=gval,
-            number={"suffix": "%"},
-            title={"text": "Projected Saving vs Baseline"},
+            value=float(val),
+            number={"suffix": suffix, "font": {"color": "#E6E8EE"}},
+            title={"text": title, "font": {"color": "#E6E8EE"}},
             gauge={
-                "axis": {"range": [0, 25]},
-                "bar": {"thickness": 0.35},
+                "axis": {"range": [min_v, max_v], "tickcolor": "#7B8190", "tickwidth": 1},
+                "bar": {"color": "#27E36A"},
+                "bgcolor": "#121418",
+                "borderwidth": 1,
+                "bordercolor": "#1C1F26",
                 "steps": [
-                    {"range": [0, 10], "color": "#2e7d32"},
-                    {"range": [10, 20], "color": "#558b2f"},
-                    {"range": [20, 25], "color": "#9e9d24"},
+                    {"range": [min_v, (min_v+max_v)*0.55], "color": "#1B1E24"},
+                    {"range": [(min_v+max_v)*0.55, (min_v+max_v)*0.8], "color": "#18221B"},
+                    {"range": [(min_v+max_v)*0.8, max_v], "color": "#152418"},
                 ],
             },
         )
     )
-    st.plotly_chart(fig_g, use_container_width=True)
+    fig.update_layout(height=260, margin=dict(l=10,r=10,t=40,b=10), paper_bgcolor="#121418")
+    st.plotly_chart(fig, use_container_width=True, theme=None)
 
-    if "light_wh_agent" in df.columns and df["light_wh_agent"].notna().any():
-        st.markdown("### Trends — Average Daily Agent Energy (Wh)")
-        daily = df.groupby("day", as_index=False)["light_wh_agent"].mean(numeric_only=True)
-        st.plotly_chart(px.line(daily, x="day", y="light_wh_agent"), use_container_width=True)
-    else:
-        st.info("No agent lighting energy data found.")
+def line_chart(df: pd.DataFrame, x: str, y: str | list[str], title: str, yaxis_title: str = ""):
+    fig = px.line(df, x=x, y=y, markers=False, title=title)
+    fig.update_layout(
+        height=300,
+        paper_bgcolor="#121418",
+        plot_bgcolor="#121418",
+        font_color="#E6E8EE",
+        title_font_color="#E6E8EE",
+        margin=dict(l=10,r=10,t=40,b=10),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+    )
+    fig.update_xaxes(gridcolor="#232832")
+    fig.update_yaxes(gridcolor="#232832", title=yaxis_title)
+    st.plotly_chart(fig, use_container_width=True, theme=None)
 
-# ---- Pump Monitoring ----
-with tab_pump:
-    st.subheader("Pump Vibration Monitoring")
-    if "pump_vib_rms_g" not in df.columns or df["pump_vib_rms_g"].dropna().empty:
-        st.info("Column 'pump_vib_rms_g' not found or empty.")
-    else:
-        try:
-            st.markdown("#### Pump Vibration (g RMS)")
-            st.plotly_chart(px.line(df, x="timestamp", y="pump_vib_rms_g").update_traces(line=dict(width=2)),
-                            use_container_width=True)
-        except Exception:
-            st.warning("Could not plot pump vibration line chart.")
+def bar_chart(df: pd.DataFrame, x: str, y: str, title: str):
+    fig = px.bar(df, x=x, y=y, title=title)
+    fig.update_layout(
+        height=300,
+        paper_bgcolor="#121418",
+        plot_bgcolor="#121418",
+        font_color="#E6E8EE",
+        title_font_color="#E6E8EE",
+        margin=dict(l=10,r=10,t=40,b=10),
+    )
+    fig.update_xaxes(gridcolor="#232832")
+    fig.update_yaxes(gridcolor="#232832")
+    st.plotly_chart(fig, use_container_width=True, theme=None)
 
-        rs = _rolling_stats_time(df, "pump_vib_rms_g", int(roll_minutes))
-        if not rs.empty and rs["roll_mean"].notna().any():
-            st.markdown(f"#### Rolling Average of Vibration (window={roll_minutes} min)")
-            st.plotly_chart(px.line(rs, x="timestamp", y="roll_mean", labels={"roll_mean": "roll_mean (g)"}),
-                            use_container_width=True)
+# -------------------------
+# Header with brand wordmark at top-left
+# -------------------------
+c1, c2 = st.columns([0.7, 0.3])
+with c1:
+    st.markdown("<h2 style='margin-top:6px'>Agentra</h2><div class='muted'>Predictive Property Manager</div>", unsafe_allow_html=True)
 
-        if anom_df is not None and not anom_df.empty:
-            st.markdown("#### Detected Anomalies")
-            ycol = "pump_vib_rms_g" if "pump_vib_rms_g" in anom_df.columns else None
-            try:
-                st.plotly_chart(
-                    px.scatter(anom_df, x="timestamp", y=ycol, color="severity",
-                               hover_data=[c for c in ["z","slope","decision_basis"] if c in anom_df.columns]),
-                    use_container_width=True
-                )
-            except Exception:
-                st.caption("Anomalies available but could not be plotted (missing numeric y).")
-
-# ---- Lighting ----
-with tab_light:
-    st.subheader("Cumulative Lighting Energy (Wh)")
-    if {"light_wh_base","light_wh_agent"}.issubset(df.columns):
-        try:
-            fig_l = px.area(df, x="timestamp", y=["light_wh_base","light_wh_agent"],
-                            labels={"value": "Energy (Wh)", "variable": "Source"})
-            st.plotly_chart(fig_l, use_container_width=True)
-        except Exception:
-            st.warning("Could not draw area chart for lighting energy.")
-
-        try:
-            by_hour = df.groupby("hour", as_index=False)["light_wh_agent"].mean(numeric_only=True)
-            st.markdown("#### Average Agent Energy by Hour")
-            st.plotly_chart(px.bar(by_hour, x="hour", y="light_wh_agent"), use_container_width=True)
-        except Exception:
-            st.caption("Could not compute hourly average.")
-    else:
-        st.info("Expected 'light_wh_base' & 'light_wh_agent'. If only W columns exist, they were auto-converted to Wh when possible.")
-
-# ---- Agent Insights ----
-with tab_agent:
-    st.subheader("Agent Action Log")
-    if anom_df is not None and not anom_df.empty:
-        show_cols = [c for c in ["timestamp","agent","action","target","severity","decision_basis"] if c in anom_df.columns]
-        if not show_cols:
-            show_cols = [c for c in anom_df.columns if c != "index"]
-        try:
-            st.dataframe(anom_df[show_cols].sort_values("timestamp", ascending=False),
-                         use_container_width=True, height=360)
-        except Exception:
-            st.dataframe(anom_df, use_container_width=True, height=360)
-
-        if "severity" in anom_df.columns:
-            try:
-                sev_cnt = anom_df.groupby(["severity"], as_index=False).size()
-                st.markdown("#### Severity Distribution")
-                st.plotly_chart(px.bar(sev_cnt, x="severity", y="size"), use_container_width=True)
-            except Exception:
-                st.caption("Could not compute severity distribution.")
-    else:
-        st.info("No agent actions logged yet (no anomalies with current thresholds or model output).")
-
-st.markdown(
-    """
-    <hr/>
-    <div style="text-align:center; opacity:.7">
-        © 2025 Agentra • Streamlit + Plotly
-    </div>
-    """,
-    unsafe_allow_html=True,
+# -------------------------
+# Tabs
+# -------------------------
+tab_overview, tab_pump, tab_light, tab_agent = st.tabs(
+    ["Overview", "Pump Monitoring", "Lighting", "Agent Insights"]
 )
+
+# =========================
+# OVERVIEW TAB
+# =========================
+with tab_overview:
+    ov = property_view.copy()
+    if ov.empty:
+        st.info("لا يوجد بيانات ضمن النطاق الزمني المحدد.")
+    else:
+        kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+        with kpi1:
+            kpi_card("Baseline Energy", f"{int(ov['baseline_kwh'].iloc[-1]):,} kWh", "This month", "ok")
+        with kpi2:
+            kpi_card("Optimized Energy", f"{int(ov['optimized_kwh'].iloc[-1]):,} kWh", f"{int(100*(1-ov['optimized_kwh'].iloc[-1]/ov['baseline_kwh'].iloc[-1]))}% vs baseline", "ok")
+        with kpi3:
+            kpi_card("Energy Saved", f"{int(ov['saved_kwh'].iloc[-1]):,} kWh", "$≈ cost saved today", "ok")
+        with kpi4:
+            active_anoms = np.random.randint(2, 9)  # demo
+            resolved = np.random.randint(1, active_anoms)
+            kpi_card("Anomalies", f"{active_anoms}", f"{resolved} resolved", "warn" if active_anoms <= 6 else "danger")
+
+        # Efficiency gauge + Savings line
+        colA, colB = st.columns([0.45, 0.55])
+        with colA:
+            eff_perc = float(np.clip(100 * ov["efficiency"].iloc[-1], 1, 100))
+            gauge("Energy Efficiency", eff_perc, "%", 0, 100)
+        with colB:
+            line_chart(ov, x="timestamp", y="saved_kwh", title="Real-Time Energy Savings", yaxis_title="kWh Saved")
+
+        # System performance (temperature, energy, vibration)
+        st.markdown("#### System Performance")
+        perf = ov[["timestamp", "temperature_c", "baseline_kwh", "vibration_mm_s"]].rename(
+            columns={"baseline_kwh": "energy_kwh"}
+        )
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=perf["timestamp"], y=perf["temperature_c"], name="Temperature (°C)", mode="lines"))
+        fig.add_trace(go.Scatter(x=perf["timestamp"], y=perf["energy_kwh"], name="Energy (kWh)", mode="lines", yaxis="y2"))
+        fig.add_trace(go.Scatter(x=perf["timestamp"], y=perf["vibration_mm_s"], name="Vibration (mm/s)", mode="lines", yaxis="y3"))
+
+        fig.update_layout(
+            height=360,
+            paper_bgcolor="#121418",
+            plot_bgcolor="#121418",
+            font_color="#E6E8EE",
+            margin=dict(l=10,r=10,t=10,b=10),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+            xaxis=dict(gridcolor="#232832"),
+            yaxis=dict(title="Temp (°C)", gridcolor="#232832"),
+            yaxis2=dict(title="Energy (kWh)", overlaying="y", side="right"),
+            yaxis3=dict(title="Vibration (mm/s)", overlaying="y", side="right", position=0.95),
+        )
+        st.plotly_chart(fig, use_container_width=True, theme=None)
+
+# =========================
+# PUMP MONITORING TAB
+# =========================
+with tab_pump:
+    pm = pump_view.copy()
+    if pm.empty:
+        st.info("لا يوجد بيانات مضخات ضمن النطاق.")
+    else:
+        # Top row KPIs
+        k1, k2, k3, k4 = st.columns(4)
+        with k1:
+            active = np.random.randint(2, 5)
+            total = 4
+            kpi_card("Pump Status", f"{active}/{total}", "Active/Total", "ok" if active >= 3 else "warn")
+        with k2:
+            avg_eff = 100 * pm["efficiency"].tail(12).mean()
+            kpi_card("Avg Efficiency", f"{avg_eff:.0f}%", "Below target" if avg_eff < 85 else "On target", "warn" if avg_eff < 85 else "ok")
+        with k3:
+            t_now = pm["temperature_c"].iloc[-1]
+            kpi_card("Temperature", f"{t_now:.0f}°C", "Normal range" if t_now <= 70 else "High", "ok" if t_now <= 70 else "danger")
+        with k4:
+            v_now = pm["vibration_mm_s"].iloc[-1]
+            sev = "Critical" if v_now >= 3.2 else ("Warning" if v_now >= 2.5 else "Low")
+            kpi_card("Vibration", f"{v_now:.1f} mm/s", sev, "danger" if sev == "Critical" else ("warn" if sev == "Warning" else "ok"))
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            gauge("Pump Efficiency", float(np.clip(pm["efficiency"].iloc[-1] * 100, 0, 100)))
+        with c2:
+            gauge("Vibration Level (mm/s)", float(pm["vibration_mm_s"].iloc[-1]), suffix=" mm/s", max_v=6)
+        with c3:
+            gauge("Temperature (°C)", float(pm["temperature_c"].iloc[-1]), suffix="°C", max_v=80)
+
+        # Trends
+        colL, colR = st.columns(2)
+        with colL:
+            line_chart(pm, "timestamp", "vibration_mm_s", "Vibration Trends", "mm/s")
+        with colR:
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=pm["timestamp"], y=pm["current_a"], name="Current (A)", mode="lines"))
+            fig.add_trace(go.Scatter(x=pm["timestamp"], y=pm["power_kw"], name="Power (kW)", mode="lines", yaxis="y2"))
+            fig.update_layout(
+                height=300,
+                paper_bgcolor="#121418",
+                plot_bgcolor="#121418",
+                font_color="#E6E8EE",
+                margin=dict(l=10,r=10,t=40,b=10),
+                xaxis=dict(gridcolor="#232832"),
+                yaxis=dict(title="Current (A)", gridcolor="#232832"),
+                yaxis2=dict(title="Power (kW)", overlaying="y", side="right"),
+                title="Current & Power",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+            )
+            st.plotly_chart(fig, use_container_width=True, theme=None)
+
+        st.markdown("#### Historical Activity & Anomalies")
+        dots = pm.copy()
+        dots["level"] = pd.cut(
+            dots["vibration_mm_s"],
+            bins=[-np.inf, 1.5, 2.5, 3.0, np.inf],
+            labels=["Normal", "Warning", "High", "Critical"],
+        )
+        fig = px.scatter(
+            dots,
+            x="timestamp",
+            y="temperature_c",
+            color="level",
+            color_discrete_sequence=px.colors.qualitative.Set2,
+            title="Vibration (level) vs Temperature",
+        )
+        fig.update_layout(
+            height=320,
+            paper_bgcolor="#121418",
+            plot_bgcolor="#121418",
+            font_color="#E6E8EE",
+            margin=dict(l=10,r=10,t=40,b=10),
+        )
+        fig.update_xaxes(gridcolor="#232832")
+        fig.update_yaxes(gridcolor="#232832", title="Temp (°C)")
+        st.plotly_chart(fig, use_container_width=True, theme=None)
+
+        st.markdown("#### Pump System Details")
+        # Small demo table
+        detail = pd.DataFrame(
+            {
+                "Pump ID": ["PUMP-001", "PUMP-002", "PUMP-003"],
+                "Status": ["Active", "Warning", "Active"],
+                "Flow Rate": ["245 L/min", "198 L/min", "210 L/min"],
+                "Pressure": ["3.2 bar", "2.8 bar", "2.9 bar"],
+                "Power": ["15.8 kW", "12.9 kW", "13.4 kW"],
+                "Last Maintenance": ["Oct 15, 2024", "Sep 28, 2024", "Aug 07, 2024"],
+            }
+        )
+        st.dataframe(detail, use_container_width=True, hide_index=True)
+
+# =========================
+# LIGHTING TAB
+# =========================
+with tab_light:
+    lv = saving_view.copy()
+    if lv.empty:
+        st.info("لا يوجد بيانات إنارة ضمن النطاق.")
+    else:
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            kpi_card("Active Zones", f"{np.random.randint(18, 32)}", "of 36 zones", "ok")
+        with c2:
+            kpi_card("Current Usage", f"{int(lv['optimized_kwh'].iloc[-1]):,} kWh", "kWh today", "ok")
+        with c3:
+            kpi_card("Avg Lux Level", f"{np.random.randint(420, 520)}", "lux", "ok")
+        with c4:
+            perc = 100 * (lv["saved_kwh"].sum() / lv["baseline_kwh"].sum())
+            kpi_card("Energy Saved", f"{perc:.1f}%", "vs baseline", "ok")
+
+        col1, col2, col3 = st.columns([0.42, 0.29, 0.29])
+        with col1:
+            # Energy vs Baseline
+            df_bar = pd.DataFrame(
+                {
+                    "timestamp": lv["timestamp"],
+                    "Baseline": lv["baseline_kwh"],
+                    "Actual": lv["optimized_kwh"],
+                }
+            )
+            fig = go.Figure()
+            fig.add_trace(go.Bar(x=df_bar["timestamp"], y=df_bar["Baseline"], name="Baseline"))
+            fig.add_trace(go.Bar(x=df_bar["timestamp"], y=df_bar["Actual"], name="Actual Usage"))
+            fig.update_layout(
+                barmode="group",
+                title="Energy Usage vs. Baseline",
+                height=300,
+                paper_bgcolor="#121418",
+                plot_bgcolor="#121418",
+                font_color="#E6E8EE",
+                margin=dict(l=10,r=10,t=40,b=10),
+            )
+            fig.update_xaxes(gridcolor="#232832")
+            fig.update_yaxes(gridcolor="#232832", title="kWh")
+            st.plotly_chart(fig, use_container_width=True, theme=None)
+        with col2:
+            gauge("Lighting Efficiency", float(np.clip(lv["efficiency"].iloc[-1] * 100, 0, 100)))
+        with col3:
+            # Lux vs Occupancy (synthetic)
+            hrs = np.arange(6, 22, 1)
+            lux = np.clip(120 + 380 * np.sin((hrs-6)/16*np.pi), 80, 600)
+            occ = np.clip(5 + 95 * np.sin((hrs-6)/16*np.pi), 0, 100)
+            df_lux = pd.DataFrame({"hour": hrs, "Lux Level": lux, "Occupancy (%)": occ})
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=df_lux["hour"], y=df_lux["Lux Level"], name="Lux Level", mode="lines"))
+            fig.add_trace(go.Scatter(x=df_lux["hour"], y=df_lux["Occupancy (%)"], name="Occupancy", mode="lines", yaxis="y2"))
+            fig.update_layout(
+                height=300,
+                paper_bgcolor="#121418",
+                plot_bgcolor="#121418",
+                font_color="#E6E8EE",
+                margin=dict(l=10,r=10,t=40,b=10),
+                xaxis=dict(title="Hour", gridcolor="#232832"),
+                yaxis=dict(title="Lux Level", gridcolor="#232832"),
+                yaxis2=dict(title="Occupancy (%)", overlaying="y", side="right"),
+                title="Lux vs Occupancy",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+            )
+            st.plotly_chart(fig, use_container_width=True, theme=None)
+
+        st.markdown("#### Zone Status Overview")
+        zones = pd.DataFrame(
+            {
+                "Zone": [f"Zone {c}" for c in ["A1","A2","B1","B2","C1","C2"]],
+                "State": ["Active","Dimmed","Active","Fault","Active","Dimmed"],
+                "Lux": [450,180,520,0,390,210],
+            }
+        )
+        st.dataframe(zones, use_container_width=True, hide_index=True)
+
+        st.markdown("#### Daily Lighting Trends")
+        zoneA = 10 + 50*np.sin(np.linspace(0, np.pi, 10)) + 30
+        zoneB = 8 + 44*np.sin(np.linspace(0, np.pi, 10)) + 25
+        zoneC = 6 + 36*np.sin(np.linspace(0, np.pi, 10)) + 20
+        hours = np.linspace(8, 22, 10)
+        df_tr = pd.DataFrame({"hour": hours, "Zone A": zoneA, "Zone B": zoneB, "Zone C": zoneC})
+        line_chart(df_tr, "hour", ["Zone A", "Zone B", "Zone C"], "Daily Lighting Trends", "Energy Usage (kWh)")
+
+# =========================
+# AGENT INSIGHTS TAB
+# =========================
+with tab_agent:
+    ag = agent_view.copy()
+    if ag.empty:
+        st.info("لا يوجد سجلات للوكيل ضمن النطاق.")
+    else:
+        a1, a2, a3, a4 = st.columns(4)
+        with a1:
+            total_actions = len(ag)
+            kpi_card("Total Actions", f"{total_actions:,}", "Last 24 hours", "ok")
+        with a2:
+            active_anom = (ag["severity"].isin(["Critical", "High"])).sum()
+            kpi_card("Active Anomalies", f"{active_anom}", f"{(ag['severity']=='Critical').sum()} critical, {(ag['severity']=='High').sum()} high", "warn" if active_anom else "ok")
+        with a3:
+            success_rate = np.clip(94.2 + np.random.normal(0, 0.7), 90, 99)
+            kpi_card("Success Rate", f"{success_rate:.1f}%", "Resolution rate", "ok")
+        with a4:
+            avg_resp = np.clip(np.random.normal(2.4, 0.35), 1.6, 4.0)
+            kpi_card("Avg Response Time", f"{avg_resp:.1f}s", "Detection to action", "ok")
+
+        colL, colR = st.columns(2)
+        with colL:
+            sev_counts = ag["severity"].value_counts().reindex(["Critical","High","Medium","Low"]).fillna(0).reset_index()
+            sev_counts.columns = ["Severity", "Count"]
+            bar_chart(sev_counts, "Severity", "Count", "Anomaly Severity Distribution")
+        with colR:
+            # Interventions timeline by agent
+            ag2 = ag.copy()
+            ag2["hour"] = ag2["timestamp"].dt.floor("1H")
+            series = ag2.groupby(["hour", "agent"]).size().reset_index(name="Interventions")
+            fig = px.line(series, x="hour", y="Interventions", color="agent", title="Agent Interventions Timeline")
+            fig.update_layout(
+                height=300,
+                paper_bgcolor="#121418",
+                plot_bgcolor="#121418",
+                font_color="#E6E8EE",
+                margin=dict(l=10,r=10,t=40,b=10),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+            )
+            fig.update_xaxes(gridcolor="#232832")
+            fig.update_yaxes(gridcolor="#232832")
+            st.plotly_chart(fig, use_container_width=True, theme=None)
+
+        st.markdown("#### Agent Event Logs")
+        show_cols = ["timestamp","agent","action","target","severity","decision","status"]
+        if not set(show_cols).issubset(ag.columns):
+            ag = fake_agent_log(80)
+        st.dataframe(
+            ag[show_cols].sort_values("timestamp", ascending=False),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+# -------------------------
+# Footer note
+# -------------------------
+st.markdown("<div class='muted' style='text-align:center; margin-top:18px'>Built for demo purposes • Thresholds (Z-score / Slope) affect anomaly sensitivity conceptually</div>", unsafe_allow_html=True)
