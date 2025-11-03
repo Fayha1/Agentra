@@ -60,26 +60,26 @@ st.markdown(
 
 
 # ================== Header (Centered logo only) ==================
+
 def render_center_header():
-    st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
-    c1, c2, c3 = st.columns([1, 3, 1])
+    # هامش علوي بسيط
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+    # نجعل العمود الأوسط أعرض قليلاً لضمان التوسيط البصري
+    c1, c2, c3 = st.columns([1, 3.2, 1])
     with c2:
+        # إن وُجد الشعار نعرضه بحجم أكبر، وإلا نعرض اسم Agentra فقط
         if LOGO_PATH.exists():
-            st.image(str(LOGO_PATH), width=280)
+            # 320–360 مناسب للـ desktop الداكن
+            st.image(str(LOGO_PATH), width=340)
         else:
             st.markdown(
                 "<h1 style='text-align:center; margin:0;'>Agentra</h1>",
                 unsafe_allow_html=True,
             )
-        st.markdown(
-            "<p class='muted' style='text-align:center; margin-top:-8px;'>Predictive Property Manager</p>",
-            unsafe_allow_html=True,
-        )
-    st.markdown("<div style='height:2px'></div>", unsafe_allow_html=True)
 
-
-render_center_header()
-
+    # لا نعرض أي نص تحت الشعار
+    st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
 
 # ================== Utils ==================
 STANDARD_TIME = "timestamp"
@@ -330,11 +330,13 @@ tab_overview, tab_pumps, tab_light, tab_insights = st.tabs(
 
 
 # ------------------ Overview ------------------
-with tab_overview:
+
+ with tab_overview:
     st.markdown("#### Overview")
 
     if energy_df.empty:
         st.info("لا توجد بيانات ضمن النطاق الزمني المحدد.")
+        st.stop()   # يوقف تنفيذ بقية محتوى هذا التبويب إذا لا توجد بيانات
     else:
         c1, c2, c3, c4 = st.columns(4)
         with c1:
@@ -348,7 +350,10 @@ with tab_overview:
             tmp = detect_anomalies(
                 energy_df.copy(),
                 ["energy_saved_kwh"],
-                z_thresh=z_th, slope_thresh=slope_th, win=win, use_isoforest=use_if
+                z_thresh=z_th,
+                slope_thresh=slope_th,
+                win=win,
+                use_isoforest=use_if
             )
             st.metric("Anomalies", f"{int(tmp['anomaly'].sum())}")
 
