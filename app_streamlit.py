@@ -331,7 +331,7 @@ tab_overview, tab_pumps, tab_light, tab_insights = st.tabs(
 
 # ------------------ Overview ------------------
 
-    with tab_overview:
+with tab_overview:
     st.markdown("#### Overview")
 
     if energy_df.empty:
@@ -356,6 +356,7 @@ tab_overview, tab_pumps, tab_light, tab_insights = st.tabs(
                 use_isoforest=use_if
             )
             st.metric("Anomalies", f"{int(tmp['anomaly'].sum())}")
+
 
         # Gauges
         g1, g2 = st.columns(2)
