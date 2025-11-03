@@ -331,7 +331,7 @@ tab_overview, tab_pumps, tab_light, tab_insights = st.tabs(
 
 # ------------------ Overview ------------------
 
- with tab_overview:
+    with tab_overview:
     st.markdown("#### Overview")
 
     if energy_df.empty:
