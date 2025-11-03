@@ -1,5 +1,6 @@
-# app_streamlit.py  (Agentra – high-fidelity UI)
+# app_streamlit.py  — Agentra (high-fidelity UI)
 from __future__ import annotations
+
 import os
 from pathlib import Path
 import datetime as dt
@@ -7,15 +8,12 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-# ---------- Plotly ----------
-try:
-    import plotly.graph_objects as go
-    from plotly.subplots import make_subplots
-    PLOTLY = True
-except Exception:
-    PLOTLY = False
+# -------- Plotly ----------
+PLOTLY = True
+from plotly.subplots import make_subplots
+import plotly.graph_objects as go
 
-# ---------- Optional sklearn ----------
+# -------- Optional sklearn ----------
 SKLEARN_AVAILABLE = False
 try:
     from sklearn.ensemble import IsolationForest
@@ -23,463 +21,488 @@ try:
 except Exception:
     SKLEARN_AVAILABLE = False
 
-# ---------- Paths ----------
-ROOT = Path(__file__).resolve().parent
+
+# ================== Paths ==================
+ROOT = Path(__file__).parent
 ASSETS = ROOT / "assets"
-LOGO_PATH = ASSETS / "FullLogo_Transparent.png"  # انتبهي لحالة الأحرف
+LOGO_PATH = ASSETS / "FullLogo_Transparent.png"
 
-CSV_ENERGY = ROOT / "sim_property_riyadh_multi.csv"
-CSV_ENERGY_SAVED = ROOT / "sim_property_riyadh_multi_saving15.csv"
-CSV_PUMPS = ROOT / "sim_pump_riyadh.csv"
-CSV_AGENT_LOG = ROOT / "agent_audit_log.csv"
+CSV_ENERGY        = ROOT / "sim_property_riyadh_multi.csv"
+CSV_ENERGY_SAVED  = ROOT / "sim_property_riyadh_multi_saving15.csv"
+CSV_PUMPS         = ROOT / "sim_pump_riyadh.csv"
+CSV_AGENT_LOG     = ROOT / "agent_audit_log.csv"
 
+
+# ================== Page & Style ==================
 st.set_page_config(
-    page_title="Agentra – Predictive Property Manager",
-    page_icon="🧠",
+    page_title="Agentra — Predictive Property Manager",
     layout="wide",
-    initial_sidebar_state="expanded",
+    page_icon="🧠",
 )
 
-# ---------- Global style ----------
-st.markdown("""
-<style>
-  .block-container{padding-top:0.8rem;padding-bottom:0.4rem;}
-  h1,h2,h3,h4{letter-spacing:.3px}
-  .kpi{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.06);
-       border-radius:16px;padding:14px 16px}
-  .card{background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.05);
-       border-radius:18px;padding:16px;margin-bottom:14px}
-  .muted{color:#aab3c1;font-size:.86rem}
-  .center-header{text-align:center;margin:8px 0 10px}
-  .center-header h2{margin:6px 0 2px;color:#eaffea;font-weight:800}
-  .center-header .sub{color:#b9c0cc;font-size:13px}
-</style>
-""", unsafe_allow_html=True)
+# لمسة لونية رسمية
+st.markdown(
+    """
+    <style>
+    .block-container { padding-top: 0.6rem; }
+    [data-testid="stSidebar"] { background:#171a1c; }
+    .stMetric { background:#161a1d; border-radius:14px; padding:14px; }
+    .stSlider > div > div { background: transparent !important; }
+    .card {
+        background: #121518; border: 1px solid #242a2e;
+        border-radius: 16px; padding: 18px; margin-bottom: 14px;
+    }
+    .muted { color:#9AA4AD; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
-# ---------- Helpers ----------
+
+# ================== Header (Centered logo only) ==================
 def render_center_header():
-    c1, c2, c3 = st.columns([1,2,1])
+    st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+    c1, c2, c3 = st.columns([1, 3, 1])
     with c2:
         if LOGO_PATH.exists():
-            st.image(str(LOGO_PATH), use_column_width=False, width=170)
-        st.markdown('<div class="center-header"><h2>Agentra</h2>'
-                    '<div class="sub">Predictive Property Manager</div></div>',
-                    unsafe_allow_html=True)
+            st.image(str(LOGO_PATH), width=280)
+        else:
+            st.markdown(
+                "<h1 style='text-align:center; margin:0;'>Agentra</h1>",
+                unsafe_allow_html=True,
+            )
+        st.markdown(
+            "<p class='muted' style='text-align:center; margin-top:-8px;'>Predictive Property Manager</p>",
+            unsafe_allow_html=True,
+        )
+    st.markdown("<div style='height:2px'></div>", unsafe_allow_html=True)
 
-def _plotly_layout(fig, h=320):
-    fig.update_layout(
-        template="plotly_dark",
-        height=h,
-        margin=dict(l=10,r=10,t=40,b=10),
-        plot_bgcolor="rgba(18,18,18,0)",
-        paper_bgcolor="rgba(18,18,18,0)",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
-    )
-    return fig
 
-def gauge(value, title, min_v=0, max_v=100, unit=""):
-    """High quality gauge."""
-    if not PLOTLY:
-        st.metric(title, f"{value:.1f}{unit}")
-        return
-    fig = go.Figure(go.Indicator(
-        mode="gauge+number",
-        value=float(value),
-        number={'suffix': unit, 'font': {'size': 26}},
-        title={'text': f"<b>{title}</b>", 'font': {'size': 14}},
-        gauge=dict(
-            axis={'range':[min_v,max_v], 'tickwidth':1, 'tickcolor':'#7a7a7a'},
-            bar={'color': '#25ff88'},
-            bgcolor="rgba(255,255,255,.02)",
-            bordercolor="rgba(255,255,255,.08)",
-            borderwidth=1,
-            steps=[
-                {'range': [min_v, (min_v+max_v)*0.6], 'color': "rgba(37,255,136,.15)"},
-                {'range': [(min_v+max_v)*0.6, (min_v+max_v)*0.85], 'color': "rgba(255,176,32,.15)"},
-                {'range': [(min_v+max_v)*0.85, max_v], 'color': "rgba(255,77,79,.15)"},
-            ],
-        )))
-    _plotly_layout(fig, h=250)
-    st.plotly_chart(fig, use_container_width=True)
-
-def read_csv_safe(path: Path) -> pd.DataFrame | None:
-    if not path.exists(): return None
-    for enc in ("utf-8","utf-8-sig","cp1256"):
-        try: return pd.read_csv(path, encoding=enc)
-        except Exception: pass
-    try: return pd.read_csv(path)
-    except Exception: return None
-
-def simulate_energy(start_dt, end_dt, freq="H"):
-    idx = pd.date_range(start_dt, end_dt, freq=freq)
-    base = 40 + 5*np.sin(np.linspace(0,2*np.pi,len(idx)))
-    usage = base + np.random.normal(0,2.1,len(idx))
-    optimized = usage * np.random.uniform(0.74,0.9)
-    temp = 24 + 6*np.sin(np.linspace(0,2*np.pi,len(idx))-1) + np.random.normal(0,0.8,len(idx))
-    vib = 1.6 + 0.7*np.sin(np.linspace(0,4*np.pi,len(idx))) + np.random.normal(0,0.12,len(idx))
-    return pd.DataFrame({
-        "timestamp": idx,
-        "energy_kwh": np.clip(usage*10, 15, None),
-        "optimized_kwh": np.clip(optimized*10, 10, None),
-        "temperature_c": np.clip(temp, 16, 45),
-        "vibration_mm_s": np.clip(vib, 0.3, 6.5),
-        "current_a": 3 + (usage-usage.min())/(usage.max()-usage.min()+1e-9)*2.5,
-        "power_kw": (usage/10)*2.6
-    })
-
-def simulate_pumps(start_dt, end_dt, freq="H"):
-    idx = pd.date_range(start_dt, end_dt, freq=freq)
-    n = len(idx)
-    eff = 75 + 8*np.sin(np.linspace(0,2*np.pi,n)) + np.random.normal(0,2,n)
-    vib = 1.2 + 1.2*np.sin(np.linspace(0,3*np.pi,n)) + np.random.normal(0,0.15,n)
-    temp = 40 + 6*np.sin(np.linspace(0,2*np.pi,n)-.6) + np.random.normal(0,.9,n)
-    cur = 1.8 + (eff-60)/60
-    pwr = 1.2 + (cur-1.2)*0.8
-    return pd.DataFrame({
-        "timestamp": idx,
-        "pump_id": np.random.choice(["PUMP-001","PUMP-002","PUMP-003","PUMP-004"], size=n),
-        "efficiency_pct": np.clip(eff, 40, 98),
-        "vibration_mm_s": np.clip(vib, .4, 8.0),
-        "temperature_c": np.clip(temp, 25, 90),
-        "current_a": np.clip(cur, .8, 5.0),
-        "power_kw": np.clip(pwr, .5, 10.0),
-        "flow_l_min": np.clip(220 + (eff-60)*2.5, 0, None),
-        "pressure_bar": np.clip(2.0 + (eff-70)/50, 0.8, 4.0),
-    })
-
-def simulate_logs(start_dt, end_dt):
-    idx = pd.date_range(start_dt, end_dt, freq="3H")
-    agents = ["HVAC Agent","Lighting Agent","Pump Agent"]
-    actions = ["Temperature Adjustment","Brightness Optimization","Speed Optimization",
-               "Schedule Override","Energy Optimization","Anomaly Detection"]
-    sev = ["Low","Medium","High","Critical"]
-    rng = np.random.default_rng(7)
-    rows=[]
-    for ts in idx:
-        for _ in range(rng.integers(1,4)):
-            rows.append({
-                "timestamp": ts + dt.timedelta(minutes=int(rng.integers(0,180))),
-                "agent": rng.choice(agents),
-                "action": rng.choice(actions),
-                "target": rng.choice(["Zone A-2","Floor 3","Pump Unit 7","Building Wide"]),
-                "severity": rng.choice(sev, p=[.35,.4,.2,.05]),
-                "decision": rng.choice(["Applied","Optimized","Resolved","Monitoring","Executed","Pending"]),
-                "status": rng.choice(["Completed","Pending","Completed","Completed","Completed","Completed"])
-            })
-    return pd.DataFrame(rows).sort_values("timestamp")
-
-def load_or_sim(csv_path, gen, start_dt, end_dt):
-    df = read_csv_safe(csv_path)
-    if df is None or df.empty:
-        return gen(start_dt, end_dt)
-    if "timestamp" in df:
-        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-        df = df.dropna(subset=["timestamp"])
-        df = df[(df["timestamp"]>=start_dt)&(df["timestamp"]<=end_dt)]
-    return df
-
-def rolling_anoms(series, window, z, slope):
-    s = series.astype(float).copy()
-    mean = s.rolling(window, min_periods=max(2,window//2)).mean()
-    std = s.rolling(window, min_periods=max(2,window//2)).std(ddof=0)
-    zscore = (s-mean)/(std.replace(0,np.nan))
-    grad = s.diff().fillna(0.0)
-    return ((zscore.abs()>z) | (grad.abs()>slope)).fillna(False)
-
-def iforest_anoms(df, cols, contamination=0.04):
-    if not SKLEARN_AVAILABLE:  # حماية
-        return pd.Series([False]*len(df), index=df.index)
-    sub = df[cols].astype(float).fillna(method="ffill").fillna(method="bfill")
-    try:
-        mdl = IsolationForest(n_estimators=150, contamination=contamination, random_state=42)
-        pred = mdl.fit_predict(sub.values)
-        return pd.Series(pred==-1, index=df.index)
-    except Exception:
-        return pd.Series([False]*len(df), index=df.index)
-
-# ---------- Header ----------
 render_center_header()
 
-# ---------- Sidebar ----------
-st.sidebar.title("Agentra")
-if LOGO_PATH.exists():
-    st.sidebar.image(str(LOGO_PATH), width=90)
-else:
-    st.sidebar.caption("Place logo at: assets/FullLogo_Transparent.png")
 
-data_source = st.sidebar.selectbox("Select data source",
-                                   ["Real-Time Sensors","Historical Data","Predictive Model"], index=0)
+# ================== Utils ==================
+STANDARD_TIME = "timestamp"
 
-z_score = st.sidebar.slider("Z-Score Sensitivity", 1.0, 5.0, 2.5, 0.1)
-slope = st.sidebar.slider("Slope Sensitivity", 0.1, 2.0, 0.8, 0.05)
-roll_win = st.sidebar.slider("Rolling Window (points)", 8, 72, 24, 1)
+@st.cache_data(show_spinner=False)
+def _read_csv(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame()
+    df = pd.read_csv(path)
+    return df
 
-# تعطيل Advanced إن لم تتوفر sklearn (بدون أخطاء عند الضغط)
-use_iforest = st.sidebar.checkbox("Advanced: IsolationForest",
-                                  value=False, disabled=not SKLEARN_AVAILABLE,
-                                  help=None if SKLEARN_AVAILABLE else "scikit-learn غير متاح هنا.")
-
-def date_range():
-    today = dt.date.today()
-    c1, c2 = st.sidebar.columns(2)
-    s = c1.date_input("From", today - dt.timedelta(days=6))
-    e = c2.date_input("To", today)
-    if s > e: s, e = e, s
-    return dt.datetime.combine(s, dt.time.min), dt.datetime.combine(e, dt.time.max)
-
-start_dt, end_dt = date_range()
-
-# ---------- Load data ----------
-if data_source == "Historical Data":
-    energy = load_or_sim(CSV_ENERGY, simulate_energy, start_dt, end_dt)
-    saved = read_csv_safe(CSV_ENERGY_SAVED)
-    if saved is not None and "timestamp" in saved and "optimized_kwh" in saved:
-        saved["timestamp"]=pd.to_datetime(saved["timestamp"],errors="coerce")
-        saved=saved.dropna(subset=["timestamp"])
-        energy = energy.merge(saved[["timestamp","optimized_kwh"]], on="timestamp", how="left", suffixes=("","_alt"))
-        energy["optimized_kwh"] = energy["optimized_kwh_alt"].fillna(energy["optimized_kwh"])
-        energy.drop(columns=[c for c in energy.columns if c.endswith("_alt")], inplace=True)
-    pumps = load_or_sim(CSV_PUMPS, simulate_pumps, start_dt, end_dt)
-    logs = load_or_sim(CSV_AGENT_LOG, simulate_logs, start_dt, end_dt)
-elif data_source == "Predictive Model":
-    energy = simulate_energy(start_dt, end_dt); energy["optimized_kwh"] *= np.random.uniform(0.68,0.85)
-    pumps = simulate_pumps(start_dt, end_dt);  pumps["efficiency_pct"] += np.random.uniform(2,4)
-    logs  = simulate_logs(start_dt, end_dt)
-else:
-    energy = simulate_energy(start_dt, end_dt)
-    pumps  = simulate_pumps(start_dt, end_dt)
-    logs   = simulate_logs(start_dt, end_dt)
-
-for df in (energy, pumps, logs):
-    if "timestamp" in df: df.sort_values("timestamp", inplace=True); df.reset_index(drop=True, inplace=True)
-
-# ---------- Anomalies ----------
-energy["anomaly_energy"] = rolling_anoms(energy["energy_kwh"], roll_win, z_score, slope)
-energy["anomaly_vibration"] = rolling_anoms(energy["vibration_mm_s"], roll_win, z_score, slope)
-pumps["anomaly_eff"] = rolling_anoms(pumps["efficiency_pct"], roll_win, z_score, slope)
-pumps["anomaly_iforest"] = iforest_anoms(pumps, ["efficiency_pct","vibration_mm_s","temperature_c","current_a","power_kw"], .05) if use_iforest else False
-
-total_baseline = float(energy["energy_kwh"].sum())
-total_optimized = float(energy["optimized_kwh"].sum())
-total_saved = max(total_baseline - total_optimized, 0.0)
-anomaly_count = int(energy["anomaly_energy"].sum() + energy["anomaly_vibration"].sum()
-                    + pumps["anomaly_eff"].sum() + (pumps["anomaly_iforest"].sum() if isinstance(pumps["anomaly_iforest"], pd.Series) else 0))
-
-# ---------- Tabs ----------
-tabs = st.tabs(["Overview","Pump Monitoring","Lighting","Agent Insights"])
-
-# ===== Overview =====
-with tabs[0]:
-    st.markdown("### Overview")
-    c1,c2,c3,c4 = st.columns(4)
-    c1.container().markdown(f'<div class="kpi"><h4>Baseline Energy</h4><h3>{total_baseline:,.0f} kWh</h3></div>', unsafe_allow_html=True)
-    c2.container().markdown(f'<div class="kpi"><h4>Optimized Energy</h4><h3>{total_optimized:,.0f} kWh</h3></div>', unsafe_allow_html=True)
-    c3.container().markdown(f'<div class="kpi"><h4>Energy Saved</h4><h3>{total_saved:,.0f} kWh</h3></div>', unsafe_allow_html=True)
-    c4.container().markdown(f'<div class="kpi"><h4>Anomalies</h4><h3>{anomaly_count}</h3></div>', unsafe_allow_html=True)
-
-    l, r = st.columns([1.1,1.2])
-    with l:
-        st.markdown("#### Energy Efficiency")
-        eff_now = np.clip(100.0 * (total_optimized/total_baseline) if total_baseline else 0, 0, 100)
-        gauge(eff_now, "Efficiency", 0, 100, "%")
-    with r:
-        st.markdown("#### Real-Time Energy Savings")
-        df = energy[["timestamp","energy_kwh","optimized_kwh"]].rename(columns={"energy_kwh":"Baseline","optimized_kwh":"Optimized"})
-        if PLOTLY:
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=df["timestamp"], y=df["Baseline"], name="Baseline",
-                                     mode="lines+markers", line=dict(width=3), marker=dict(size=5)))
-            fig.add_trace(go.Scatter(x=df["timestamp"], y=df["Optimized"], name="Optimized",
-                                     mode="lines+markers", line=dict(width=3), marker=dict(size=5)))
-            _plotly_layout(fig, h=320)
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.line_chart(df.set_index("timestamp")[["Baseline","Optimized"]])
-
-    st.markdown("#### System Performance")
-    perf = pd.DataFrame({
-        "timestamp": energy["timestamp"],
-        "Temperature (°C)": energy["temperature_c"],
-        "Energy Usage (kWh)": energy["energy_kwh"],
-        "Vibration (mm/s)": energy["vibration_mm_s"],
-    })
-    if PLOTLY:
-        fig = go.Figure()
-        for col in ["Temperature (°C)","Energy Usage (kWh)","Vibration (mm/s)"]:
-            fig.add_trace(go.Scatter(x=perf["timestamp"], y=perf[col], name=col,
-                                     mode="lines", line=dict(width=3)))
-        _plotly_layout(fig, h=350)
-        st.plotly_chart(fig, use_container_width=True)
+def _ensure_time(df: pd.DataFrame, col_guess: str | None = None) -> pd.DataFrame:
+    """Normalize a time column -> 'timestamp' (datetime, sorted)."""
+    if df.empty:
+        return df
+    candidates = [STANDARD_TIME, "time", "date", "datetime"]
+    if col_guess:
+        candidates.insert(0, col_guess)
+    found = None
+    for c in candidates:
+        if c in df.columns:
+            found = c
+            break
+    if found is None:
+        # try detect first datetime-like column
+        for c in df.columns:
+            if np.issubdtype(df[c].dtype, np.number):
+                continue
+            try:
+                pd.to_datetime(df[c])
+                found = c
+                break
+            except Exception:
+                pass
+    if found is None:
+        # fabricate a time index if not present
+        df[STANDARD_TIME] = pd.date_range(dt.datetime.now() - dt.timedelta(hours=len(df)), periods=len(df), freq="H")
     else:
-        st.line_chart(perf.set_index("timestamp"))
+        df[STANDARD_TIME] = pd.to_datetime(df[found], errors="coerce")
+    df = df.dropna(subset=[STANDARD_TIME]).sort_values(STANDARD_TIME)
+    return df
 
-# ===== Pump Monitoring =====
-with tabs[1]:
-    st.markdown("### Pump Monitoring")
-    t1,t2,t3,t4 = st.columns(4)
-    t1.markdown(f'<div class="kpi"><h4>Pump Status</h4><h3>{(pumps["efficiency_pct"]>0).sum()}/{pumps["pump_id"].nunique()}</h3></div>', unsafe_allow_html=True)
-    t2.markdown(f'<div class="kpi"><h4>Avg Efficiency</h4><h3>{pumps["efficiency_pct"].mean():.0f}%</h3></div>', unsafe_allow_html=True)
-    t3.markdown(f'<div class="kpi"><h4>Temperature</h4><h3>{pumps["temperature_c"].mean():.0f}°C</h3></div>', unsafe_allow_html=True)
-    t4.markdown(f'<div class="kpi"><h4>Vibration</h4><h3>{pumps["vibration_mm_s"].mean():.1f} mm/s</h3></div>', unsafe_allow_html=True)
+def gauge(value: float, title: str, suffix: str = "", vmin: float = 0, vmax: float = 100):
+    fig = go.Figure(
+        go.Indicator(
+            mode="gauge+number",
+            value=float(value) if pd.notna(value) else 0.0,
+            number={'suffix': f" {suffix}", 'font': {'size': 24}},
+            gauge={
+                "axis": {"range": [vmin, vmax]},
+                "bar": {"color": "#00e676"},
+                "bgcolor": "#121518",
+                "borderwidth": 1,
+                "bordercolor": "#30363d",
+                "steps": [
+                    {"range":[vmin, (vmin+vmax*0.6)], "color":"#1f2a30"},
+                    {"range":[(vmin+vmax*0.6), vmax], "color":"#182126"}
+                ],
+            },
+            title={"text": f"<b>{title}</b>", "font": {"size": 16}},
+        )
+    )
+    fig.update_layout(height=260, margin=dict(l=10, r=10, t=40, b=10))
+    return fig
 
-    g1,g2,g3 = st.columns(3)
-    with g1: st.markdown("#### Pump Efficiency"); gauge(pumps["efficiency_pct"].tail(1).mean(), "Efficiency", 0, 100, "%")
-    with g2: st.markdown("#### Vibration Level");  gauge(pumps["vibration_mm_s"].tail(1).mean(), "mm/s", 0, 8, " mm/s")
-    with g3: st.markdown("#### Temperature");      gauge(pumps["temperature_c"].tail(1).mean(), "°C", 0, 100, "°C")
 
-    st.markdown("#### Vibration Trends & Current vs Power")
-    a,b = st.columns(2)
-    with a:
-        if PLOTLY:
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=pumps["timestamp"], y=pumps["vibration_mm_s"],
-                                     mode="lines+markers", name="Vibration",
-                                     line=dict(width=3), marker=dict(size=5)))
-            thr = pumps["vibration_mm_s"].mean() + pumps["vibration_mm_s"].std()
-            fig.add_hline(y=float(thr), line_dash="dash", line_color="#ffb020")
-            _plotly_layout(fig, h=320)
-            st.plotly_chart(fig, use_container_width=True)
+def rolling_zscore(x: pd.Series, window: int) -> pd.Series:
+    r = x.rolling(window, min_periods=max(3, window//3))
+    return (x - r.mean()) / (r.std().replace(0, np.nan))
+
+def rolling_slope(x: pd.Series, window: int) -> pd.Series:
+    # finite diff of moving-average gives اتجاه الميل
+    r = x.rolling(window, min_periods=max(3, window//3)).mean()
+    return r.diff()
+
+
+def detect_anomalies(
+    df: pd.DataFrame,
+    value_cols: list[str],
+    z_thresh: float = 2.5,
+    slope_thresh: float = 0.8,
+    win: int = 24,
+    use_isoforest: bool = False,
+) -> pd.DataFrame:
+    """Return dataframe with anomaly flags & scores."""
+    result = df.copy()
+    if result.empty or not value_cols:
+        return result
+
+    # Z-score + slope per عمود
+    for col in value_cols:
+        if col not in result.columns:
+            continue
+        result[f"{col}_z"] = rolling_zscore(result[col].astype(float), win)
+        result[f"{col}_dz"] = rolling_slope(result[col].astype(float), win)
+
+    # أقوى شذوذ عبر الأعمدة
+    z_cols = [c for c in result.columns if c.endswith("_z")]
+    dz_cols = [c for c in result.columns if c.endswith("_dz")]
+    result["z_max"] = result[z_cols].abs().max(axis=1) if z_cols else np.nan
+    result["dz_max"] = result[dz_cols].abs().max(axis=1) if dz_cols else np.nan
+    result["anomaly_rule"] = (result["z_max"] >= z_thresh) | (result["dz_max"] >= slope_thresh)
+
+    # IsolationForest (متعدد المتغيرات) اختياري
+    if use_isoforest and SKLEARN_AVAILABLE:
+        feat = result[value_cols].astype(float).replace([np.inf, -np.inf], np.nan).fillna(method="ffill").fillna(method="bfill")
+        if len(feat) >= 32:
+            try:
+                model = IsolationForest(n_estimators=150, contamination="auto", random_state=42)
+                scores = model.fit_predict(feat.values)  # -1 = anomaly
+                result["anomaly_if"] = (scores == -1)
+            except Exception:
+                result["anomaly_if"] = False
         else:
-            st.line_chart(pumps.set_index("timestamp")[["vibration_mm_s"]])
-    with b:
-        if PLOTLY:
-            fig = make_subplots(specs=[[{"secondary_y": True}]])
-            fig.add_trace(
-    go.Scatter(
-        x=pumps["timestamp"],
-        y=pumps["current_a"],
-        name="Current (A)",
-        mode="lines+markers",
-        line=dict(width=3),
-        marker=dict(size=5)
-    ),
-    secondary_y=False
-)
-
-            fig.update_yaxes(title_text="Current (A)", secondary_y=False)
-            fig.update_yaxes(title_text="Power (kW)", secondary_y=True)
-            _plotly_layout(fig, h=320)
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.line_chart(pumps.set_index("timestamp")[["current_a","power_kw"]])
-
-    st.markdown("#### Historical Activity & Anomalies")
-    pump_ano = pd.DataFrame({
-        "timestamp": pumps["timestamp"],
-        "Critical": ( (pumps["vibration_mm_s"] > 3.5) | (isinstance(pumps["anomaly_iforest"], pd.Series) & pumps["anomaly_iforest"]) ).astype(int),
-        "Warning": pumps["anomaly_eff"].astype(int),
-        "Normal": (~(pumps["anomaly_eff"] | (isinstance(pumps["anomaly_iforest"], pd.Series) & pumps["anomaly_iforest"]))).astype(int),
-    })
-    if PLOTLY:
-        fig = go.Figure()
-        for col, color in [("Critical","#ff4d4f"),("Warning","#ffb020"),("Normal","#22dd77")]:
-            fig.add_trace(go.Scatter(x=pump_ano["timestamp"], y=pump_ano[col], mode="markers",
-                                     name=col, marker=dict(color=color, size=7, opacity=.9)))
-        _plotly_layout(fig, h=260)
-        st.plotly_chart(fig, use_container_width=True)
+            result["anomaly_if"] = False
     else:
-        st.line_chart(pump_ano.set_index("timestamp")[["Critical","Warning","Normal"]])
+        result["anomaly_if"] = False
 
-    st.markdown("#### Pump System Details")
-    details = pumps.copy()
-    if isinstance(details["anomaly_iforest"], pd.Series):
-        details["status"] = np.where(details["anomaly_iforest"] | details["anomaly_eff"], "⚠️ Check", "Active")
-    else:
-        details["status"] = np.where(details["anomaly_eff"], "⚠️ Check", "Active")
-    st.dataframe(
-        details[["timestamp","pump_id","status","flow_l_min","pressure_bar","power_kw"]]
-        .rename(columns={"timestamp":"Time","pump_id":"Pump","flow_l_min":"Flow (L/min)","pressure_bar":"Pressure (bar)","power_kw":"Power (kW)"}),
-        use_container_width=True, height=260
+    result["anomaly"] = result["anomaly_rule"] | result["anomaly_if"]
+    return result
+
+
+# ================== Sidebar Controls (no logo/title) ==================
+with st.sidebar:
+    st.markdown("### ")
+    source = st.selectbox(
+        "Select data source",
+        ["Real-Time Sensors", "Historical Data", "Predictive Model"],
+        index=0,
     )
 
-# ===== Lighting =====
-with tabs[2]:
-    st.markdown("### Lighting")
-    t = st.columns(4)
-    active_zones = int(np.random.randint(18,36))
-    curr_kwh = float(energy["optimized_kwh"].tail(24).sum())
-    avg_lux = int(np.clip(480 + np.random.randn()*30, 200, 900))
-    pct_saved = (1 - (total_optimized/total_baseline))*100 if total_baseline else 0.0
-    t[0].markdown(f'<div class="kpi"><h4>Active Zones</h4><h3>{active_zones}/36</h3></div>', unsafe_allow_html=True)
-    t[1].markdown(f'<div class="kpi"><h4>Current Usage</h4><h3>{curr_kwh:.0f} kWh</h3></div>', unsafe_allow_html=True)
-    t[2].markdown(f'<div class="kpi"><h4>Avg Lux Level</h4><h3>{avg_lux} lux</h3></div>', unsafe_allow_html=True)
-    t[3].markdown(f'<div class="kpi"><h4>Energy Saved</h4><h3>{pct_saved:.1f}%</h3></div>', unsafe_allow_html=True)
+    z_th = st.slider("Z-Score Sensitivity", 1.0, 5.0, 2.5, 0.05)
+    slope_th = st.slider("Slope Sensitivity", 0.10, 2.0, 0.80, 0.05)
+    win = st.slider("Rolling Window (points)", 8, 72, 24, 1)
 
-    l, r = st.columns([1.1,1.2])
-    with l:
-        st.markdown("#### Energy Usage vs Baseline")
-        bars = pd.DataFrame({"Day":["Mon","Tue","Wed","Thu","Fri","Sat","Sun"],
-                             "Baseline": np.random.randint(400,520,7),
-                             "Actual":   np.random.randint(260,430,7)})
-        if PLOTLY:
-            fig = go.Figure()
-            fig.add_trace(go.Bar(x=bars["Day"], y=bars["Baseline"], name="Baseline"))
-            fig.add_trace(go.Bar(x=bars["Day"], y=bars["Actual"],   name="Actual"))
-            fig.update_layout(barmode="group")
-            _plotly_layout(fig, h=300)
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.bar_chart(bars.set_index("Day"))
-    with r:
-        st.markdown("#### Lighting Efficiency")
-        gauge(76, "Efficient", 0, 100, "%")
+    use_if = st.checkbox("Advanced: IsolationForest", value=False, disabled=not SKLEARN_AVAILABLE)
+    if not SKLEARN_AVAILABLE:
+        st.caption("scikit-learn غير متاح في هذه البيئة (فعّلها أو أضِفها للمتطلبات).")
 
-    st.markdown("#### Lux Levels vs. Occupancy")
-    lux = 150 + np.array([80,150,220,260,230,180,120,60])
-    occ = np.array([5,15,35,47,40,28,12,4])
-    xh = ["6AM","8AM","10AM","12PM","3PM","6PM","8PM","9PM"]
-    if PLOTLY:
-        fig = make_subplots(specs=[[{"secondary_y": True}]])
-        fig.add_trace(go.Scatter(x=xh, y=lux, name="Lux Level",
-                                 mode="lines+markers", line=dict(width=3), marker=dict(size=5)), secondary_y=False)
-        fig.add_trace(go.Scatter(x=xh, y=occ, name="Occupancy %",
-                                 mode="lines+markers", line=dict(width=3), marker=dict(size=5)), secondary_y=True)
-        fig.update_yaxes(title_text="Lux", secondary_y=False)
-        fig.update_yaxes(title_text="Occupancy (%)", secondary_y=True)
-        _plotly_layout(fig, h=320)
-        st.plotly_chart(fig, use_container_width=True)
+    st.markdown("---")
+    st.caption("Date Range")
+    start_date = st.date_input("From", dt.date.today() - dt.timedelta(days=6))
+    end_date = st.date_input("To", dt.date.today())
+
+
+# ================== Load & Prepare Data ==================
+def load_energy(source_key: str) -> pd.DataFrame:
+    """
+    Real-Time  -> sim_property_riyadh_multi.csv  (raw baseline energy)
+    Predictive -> sim_property_riyadh_multi_saving15.csv (baseline + optimized)
+    Historical -> نستخدم الملفين ونطبّق window أطول (كمثال)
+    """
+    base = _read_csv(CSV_ENERGY)
+    base = _ensure_time(base)
+
+    opt = _read_csv(CSV_ENERGY_SAVED)
+    opt = _ensure_time(opt)
+
+    # توحيد الأعمدة إن لزم
+    # نتوقع: baseline(kWh), optimized(kWh) أو columns شبيهة
+    def _rename(df: pd.DataFrame) -> pd.DataFrame:
+        mapping = {}
+        for c in df.columns:
+            lc = c.lower()
+            if "base" in lc and "kwh" in lc:
+                mapping[c] = "baseline_kwh"
+            elif "opt" in lc and "kwh" in lc:
+                mapping[c] = "optimized_kwh"
+            elif c == STANDARD_TIME:
+                mapping[c] = STANDARD_TIME
+        return df.rename(columns=mapping)
+
+    base = _rename(base)
+    opt = _rename(opt)
+
+    # دمج على الـ timestamp
+    df = base[[STANDARD_TIME] + [c for c in base.columns if c != STANDARD_TIME]].copy()
+    if "optimized_kwh" not in df.columns and "optimized_kwh" in opt.columns:
+        df = df.merge(opt[[STANDARD_TIME, "optimized_kwh"]], on=STANDARD_TIME, how="left")
+
+    # اشتقاق
+    if "baseline_kwh" not in df.columns:
+        # fallback: أول عمود رقمي كـ baseline
+        num_cols = [c for c in df.columns if c != STANDARD_TIME and pd.api.types.is_numeric_dtype(df[c])]
+        if num_cols:
+            df = df.rename(columns={num_cols[0]: "baseline_kwh"})
+    if "optimized_kwh" not in df.columns and "baseline_kwh" in df.columns:
+        # predictive/real-time: نفترض خفض 20% كمثال إن لم توجد optimized
+        df["optimized_kwh"] = df["baseline_kwh"] * 0.8
+
+    df["energy_saved_kwh"] = (df["baseline_kwh"] - df["optimized_kwh"]).clip(lower=0)
+
+    # تطبيق نطاق التاريخ
+    if not df.empty:
+        mask = (df[STANDARD_TIME].dt.date >= start_date) & (df[STANDARD_TIME].dt.date <= end_date)
+        df = df.loc[mask].reset_index(drop=True)
+
+    # سلوك حسب المصدر
+    if source_key == "Historical Data":
+        # تنعيم أكبر (مثال على اختلاف السلوك)
+        if not df.empty:
+            df["baseline_kwh"] = df["baseline_kwh"].rolling(6, min_periods=1).mean()
+            df["optimized_kwh"] = df["optimized_kwh"].rolling(6, min_periods=1).mean()
+            df["energy_saved_kwh"] = df["energy_saved_kwh"].rolling(6, min_periods=1).mean()
+
+    elif source_key == "Predictive Model":
+        # إبراز التنبؤ عبر إضافة هامش توفير
+        df["optimized_kwh"] = df["optimized_kwh"] * 0.97  # تحسين افتراضي 3% إضافية كمثال
+        df["energy_saved_kwh"] = (df["baseline_kwh"] - df["optimized_kwh"]).clip(lower=0)
+
+    return df
+
+
+def load_pumps() -> pd.DataFrame:
+    df = _read_csv(CSV_PUMPS)
+    df = _ensure_time(df)
+    # توقع أسماء: efficiency / vibration / temperature / current / power
+    # إعادة تسمية شائعة
+    rename = {}
+    low = [c.lower() for c in df.columns]
+    for c in df.columns:
+        lc = c.lower()
+        if "eff" in lc: rename[c] = "efficiency"
+        if "vib" in lc: rename[c] = "vibration"
+        if "temp" in lc: rename[c] = "temperature"
+        if lc == "current" or "amp" in lc: rename[c] = "current"
+        if "power" in lc or "kw" in lc: rename[c] = "power"
+    df = df.rename(columns=rename)
+    return df
+
+
+def load_agent_logs() -> pd.DataFrame:
+    df = _read_csv(CSV_AGENT_LOG)
+    df = _ensure_time(df)
+    # نتوقع: agent, action, target, severity, decision, status
+    return df
+
+
+energy_df = load_energy(source)
+pump_df   = load_pumps()
+logs_df   = load_agent_logs()
+
+
+# ================== Tabs ==================
+tab_overview, tab_pumps, tab_light, tab_insights = st.tabs(
+    ["Overview", "Pump Monitoring", "Lighting", "Agent Insights"]
+)
+
+
+# ------------------ Overview ------------------
+with tab_overview:
+    st.markdown("#### Overview")
+
+    if energy_df.empty:
+        st.info("لا توجد بيانات ضمن النطاق الزمني المحدد.")
     else:
-        st.line_chart(pd.DataFrame({"Lux":lux,"Occupancy %":occ}, index=xh))
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            st.metric("Baseline Energy", f"{energy_df['baseline_kwh'].sum():,.0f} kWh")
+        with c2:
+            st.metric("Optimized Energy", f"{energy_df['optimized_kwh'].sum():,.0f} kWh")
+        with c3:
+            st.metric("Energy Saved", f"{energy_df['energy_saved_kwh'].sum():,.0f} kWh")
+        with c4:
+            # عدّ الشذوذ على saved (مثال)
+            tmp = detect_anomalies(
+                energy_df.copy(),
+                ["energy_saved_kwh"],
+                z_thresh=z_th, slope_thresh=slope_th, win=win, use_isoforest=use_if
+            )
+            st.metric("Anomalies", f"{int(tmp['anomaly'].sum())}")
 
-# ===== Agent Insights =====
-with tabs[3]:
-    st.markdown("### Agent Insights")
-    fc1,fc2,fc3,fc4 = st.columns(4)
-    fc1.markdown(f'<div class="kpi"><h4>Total Actions</h4><h3>{len(logs):,}</h3></div>', unsafe_allow_html=True)
-    active_anom = anomaly_count if anomaly_count else np.random.randint(1,8)
-    fc2.markdown(f'<div class="kpi"><h4>Active Anomalies</h4><h3>{active_anom}</h3></div>', unsafe_allow_html=True)
-    fc3.markdown(f'<div class="kpi"><h4>Success Rate</h4><h3>94.2%</h3></div>', unsafe_allow_html=True)
-    fc4.markdown(f'<div class="kpi"><h4>Avg Response Time</h4><h3>2.4s</h3></div>', unsafe_allow_html=True)
+        # Gauges
+        g1, g2 = st.columns(2)
+        with g1:
+            eff = (energy_df["optimized_kwh"].sum() / max(energy_df["baseline_kwh"].sum(), 1e-6)) * 100
+            st.plotly_chart(gauge(eff, "Energy Efficiency", "%"), use_container_width=True)
+        with g2:
+            # معدل توفير لحظي
+            last = energy_df.tail(max(24, min(96, len(energy_df)))).copy()
+            if not last.empty:
+                saving = (1 - (last["optimized_kwh"].mean() / max(last["baseline_kwh"].mean(), 1e-6))) * 100
+            else:
+                saving = 0
+            st.plotly_chart(gauge(saving, "Avg Saving (last window)", "%"), use_container_width=True)
 
-    st.markdown("#### Anomaly Severity Distribution")
-    sev = logs["severity"].value_counts().reindex(["Critical","High","Medium","Low"]).fillna(0)
-    if PLOTLY:
-        fig = go.Figure(go.Bar(x=sev.index, y=sev.values, marker_color=["#ff4d4f","#ffb020","#ffd24a","#22dd77"]))
-        _plotly_layout(fig, h=280)
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.bar_chart(sev)
-
-    st.markdown("#### Agent Interventions Timeline")
-    tl = logs.copy()
-    tl["hour"] = tl["timestamp"].dt.floor("H")
-    time_counts = tl.groupby(["hour","agent"]).size().unstack(fill_value=0)
-    if PLOTLY:
+        # Line — Real-Time Energy Savings
         fig = go.Figure()
-        for col in time_counts.columns:
-            fig.add_trace(go.Scatter(x=time_counts.index, y=time_counts[col], name=col,
-                                     mode="lines+markers", line=dict(width=3), marker=dict(size=5)))
-        _plotly_layout(fig, h=310)
+        fig.add_scatter(
+            x=energy_df[STANDARD_TIME], y=energy_df["baseline_kwh"],
+            mode="lines", name="Baseline", line=dict(width=2)
+        )
+        fig.add_scatter(
+            x=energy_df[STANDARD_TIME], y=energy_df["optimized_kwh"],
+            mode="lines", name="Optimized", line=dict(width=2)
+        )
+        fig.update_layout(
+            title="Real-Time Energy Savings",
+            margin=dict(l=10, r=10, t=40, b=10),
+            height=360, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        )
         st.plotly_chart(fig, use_container_width=True)
+
+
+# ------------------ Pump Monitoring ------------------
+with tab_pumps:
+    st.markdown("#### Pump Monitoring")
+
+    if pump_df.empty:
+        st.info("لا توجد بيانات مضخّات متاحة.")
     else:
-        st.line_chart(time_counts)
+        # KPIs
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            st.metric("Pump Status", f"{len(pump_df)}/{max(len(pump_df),1)}")
+        with c2:
+            st.metric("Avg Efficiency", f"{pump_df.get('efficiency', pd.Series([0])).mean():.0f}%")
+        with c3:
+            st.metric("Temperature", f"{pump_df.get('temperature', pd.Series([0])).mean():.0f}°C")
+        with c4:
+            st.metric("Vibration", f"{pump_df.get('vibration', pd.Series([0])).mean():.2f} mm/s")
 
-    st.markdown("#### Agent Event Logs")
-    show = ["timestamp","agent","action","target","severity","decision","status"]
-    show = [c for c in show if c in logs.columns]
-    st.dataframe(logs[show].sort_values("timestamp", ascending=False),
-                 use_container_width=True, height=320)
+        # Gauges
+        g1, g2, g3 = st.columns(3)
+        with g1:
+            st.plotly_chart(gauge(pump_df["efficiency"].tail(1).mean() if "efficiency" in pump_df else 0, "Pump Efficiency", "%"), use_container_width=True)
+        with g2:
+            st.plotly_chart(gauge(pump_df["vibration"].tail(1).mean() if "vibration" in pump_df else 0, "Vibration Level", "mm/s", vmin=0, vmax=6), use_container_width=True)
+        with g3:
+            st.plotly_chart(gauge(pump_df["temperature"].tail(1).mean() if "temperature" in pump_df else 0, "Temperature", "°C", vmin=0, vmax=80), use_container_width=True)
 
-st.markdown("<div class='muted' style='text-align:center;margin-top:10px'>"
-            "Anomaly engine: rolling Z-score + gradient; optional IsolationForest."
-            "</div>", unsafe_allow_html=True)
+        # Trends
+        t1, t2 = st.columns(2)
+        with t1:
+            fig_v = go.Figure()
+            if "vibration" in pump_df:
+                fig_v.add_scatter(x=pump_df[STANDARD_TIME], y=pump_df["vibration"], mode="lines+markers", name="Vibration", line=dict(width=3))
+            fig_v.update_layout(title="Vibration Trends", margin=dict(l=10, r=10, t=40, b=10), height=360)
+            st.plotly_chart(fig_v, use_container_width=True)
+        with t2:
+            fig_cp = make_subplots(specs=[[{"secondary_y": True}]])
+            if {"current", "power"}.issubset(pump_df.columns):
+                fig_cp.add_scatter(x=pump_df[STANDARD_TIME], y=pump_df["current"], mode="lines+markers",
+                                   line=dict(width=3), name="Current (A)", secondary_y=False)
+                fig_cp.add_scatter(x=pump_df[STANDARD_TIME], y=pump_df["power"], mode="lines+markers",
+                                   line=dict(width=2), name="Power (kW)", secondary_y=True)
+            fig_cp.update_layout(title="Current & Power", margin=dict(l=10, r=10, t=40, b=10), height=360)
+            st.plotly_chart(fig_cp, use_container_width=True)
+
+        # Anomaly timeline (multi-variate)
+        val_cols = [c for c in ["efficiency", "vibration", "temperature", "current", "power"] if c in pump_df.columns]
+        pump_an = detect_anomalies(
+            pump_df.copy(), val_cols, z_thresh=z_th, slope_thresh=slope_th, win=win, use_isoforest=use_if
+        )
+        if not pump_an.empty:
+            fig_a = go.Figure()
+            fig_a.add_scatter(x=pump_an[STANDARD_TIME], y=pump_an["z_max"], mode="lines", name="|Z|max")
+            fig_a.add_scatter(x=pump_an[STANDARD_TIME], y=pump_an["dz_max"], mode="lines", name="|Slope|max")
+            # نقاط الشذوذ
+            an_pts = pump_an[pump_an["anomaly"]]
+            fig_a.add_scatter(
+                x=an_pts[STANDARD_TIME], y=an_pts["z_max"], mode="markers",
+                name="Anomaly", marker=dict(size=8, color="#ff5252")
+            )
+            fig_a.update_layout(title="Anomaly Scores (Z & Slope) + Flags", margin=dict(l=10, r=10, t=40, b=10), height=360)
+            st.plotly_chart(fig_a, use_container_width=True)
+
+
+# ------------------ Lighting ------------------
+with tab_light:
+    st.markdown("#### Lighting")
+    if energy_df.empty:
+        st.info("لا توجد بيانات إنارة ضمن النطاق.")
+    else:
+        # Energy usage vs baseline (weekly/day-level مثال)
+        fig_l = go.Figure()
+        fig_l.add_bar(x=energy_df[STANDARD_TIME], y=energy_df["baseline_kwh"], name="Baseline")
+        fig_l.add_bar(x=energy_df[STANDARD_TIME], y=energy_df["optimized_kwh"], name="Optimized")
+        fig_l.update_layout(
+            barmode="group", title="Energy Usage vs Baseline (Lighting Proxy)",
+            margin=dict(l=10, r=10, t=40, b=10), height=360
+        )
+        st.plotly_chart(fig_l, use_container_width=True)
+
+        # Lux vs occupancy (محاكاة بسيطة إذا لم توجد أعمدة)
+        t = energy_df[STANDARD_TIME]
+        lux = (energy_df["optimized_kwh"].max() - energy_df["optimized_kwh"]).fillna(0)
+        occ = (lux / lux.max() * 100).fillna(0)
+        fig_lo = make_subplots(specs=[[{"secondary_y": True}]])
+        fig_lo.add_scatter(x=t, y=lux, name="Lux Level", mode="lines", line=dict(width=3), secondary_y=False)
+        fig_lo.add_scatter(x=t, y=occ, name="Occupancy (%)", mode="lines", line=dict(width=2), secondary_y=True)
+        fig_lo.update_layout(title="Lux Levels vs. Occupancy (Simulated)", margin=dict(l=10, r=10, t=40, b=10), height=360)
+        st.plotly_chart(fig_lo, use_container_width=True)
+
+
+# ------------------ Agent Insights ------------------
+with tab_insights:
+    st.markdown("#### Agent Insights")
+    if logs_df.empty:
+        st.info("لا يوجد سجلات للوكلاء ضمن النطاق.")
+    else:
+        # KPIs
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            st.metric("Total Actions", f"{len(logs_df):,}")
+        with c2:
+            active_anoms = (logs_df["severity"].astype(str).str.lower().isin(["critical", "high"])).sum() if "severity" in logs_df.columns else 0
+            st.metric("Active Anomalies", f"{active_anoms}")
+        with c3:
+            st.metric("Success Rate", "94.2%")
+        with c4:
+            st.metric("Avg Response Time", "2.4s")
+
+        # توزيع الشدة
+        if "severity" in logs_df.columns:
+            sev_counts = logs_df["severity"].str.title().value_counts()
+            fig_b = go.Figure([go.Bar(x=sev_counts.index, y=sev_counts.values)])
+            fig_b.update_layout(title="Anomaly Severity Distribution", height=320, margin=dict(l=10, r=10, t=40, b=10))
+            st.plotly_chart(fig_b, use_container_width=True)
+
+        # جدول الأحداث
+        view_cols = [c for c in ["timestamp", "agent", "action", "target", "severity", "decision", "status"] if c in logs_df.columns]
+        st.dataframe(logs_df[view_cols].sort_values("timestamp", ascending=False).head(50), use_container_width=True)
+
+        # تذكير بخوارزمية الشذوذ المستخدمة
+        st.caption("Anomaly engine: rolling Z-score + slope; optional IsolationForest (multivariate).")
