@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-# Optional: Plotly for nicer gauges/plots (falls back to st.line_chart if missing)
+# Optional: Plotly (nice charts). Falls back to Streamlit charts if not available.
 try:
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
@@ -23,7 +23,7 @@ try:
 except Exception:
     PLOTLY = False
 
-# Optional IsolationForest
+# Optional IsolationForest for multivariate anomalies
 SKLEARN_AVAILABLE = False
 try:
     from sklearn.ensemble import IsolationForest
@@ -34,12 +34,12 @@ except Exception:
 # -------------------------
 # Paths & constants
 # -------------------------
-ROOT = Path(__file__).parent
+ROOT = Path(__file__).resolve().parent
 ASSETS = ROOT / "assets"
 LOGO_PATH = ASSETS / "FullLogo_Transparent.png"
 
 CSV_ENERGY = ROOT / "sim_property_riyadh_multi.csv"
-CSV_ENERGY_SAVED = ROOT / "sim_property_riyadh_multi_saving15.csv"
+CSV_ENERGY_SAVED = ROOT / "sim_property_riyadh_multi_saving15.csv"  # optional
 CSV_PUMPS = ROOT / "sim_pump_riyadh.csv"
 CSV_AGENT_LOG = ROOT / "agent_audit_log.csv"
 
@@ -84,6 +84,7 @@ def render_center_header():
     c1, c2, c3 = st.columns([1, 2, 1])
     with c2:
         if LOGO_PATH.exists():
+            # centered header logo
             st.image(str(LOGO_PATH), use_column_width=False, width=180)
         st.markdown(
             """
@@ -95,16 +96,7 @@ def render_center_header():
             unsafe_allow_html=True,
         )
 
-def date_range_picker():
-    today = dt.date.today()
-    col1, col2 = st.sidebar.columns(2)
-    start = col1.date_input("From", today - dt.timedelta(days=6))
-    end = col2.date_input("To", today)
-    if start > end:
-        st.sidebar.warning("Start date is after end date. Swapping.")
-        start, end = end, start
-    return start, end
-
+@st.cache_data(show_spinner=False)
 def simulate_energy(start_dt: dt.datetime, end_dt: dt.datetime, freq="H") -> pd.DataFrame:
     idx = pd.date_range(start_dt, end_dt, freq=freq)
     base = 40 + 5*np.sin(np.linspace(0, 2*np.pi, len(idx)))
@@ -123,6 +115,7 @@ def simulate_energy(start_dt: dt.datetime, end_dt: dt.datetime, freq="H") -> pd.
     })
     return df
 
+@st.cache_data(show_spinner=False)
 def simulate_pumps(start_dt: dt.datetime, end_dt: dt.datetime, freq="H") -> pd.DataFrame:
     idx = pd.date_range(start_dt, end_dt, freq=freq)
     n = len(idx)
@@ -143,6 +136,7 @@ def simulate_pumps(start_dt: dt.datetime, end_dt: dt.datetime, freq="H") -> pd.D
         "pressure_bar": np.clip(2.0 + (eff-70)/50, 0.8, 4.0),
     })
 
+@st.cache_data(show_spinner=False)
 def simulate_agent_logs(start_dt: dt.datetime, end_dt: dt.datetime) -> pd.DataFrame:
     idx = pd.date_range(start_dt, end_dt, freq="3H")
     agents = ["HVAC Agent", "Lighting Agent", "Pump Agent"]
@@ -164,17 +158,28 @@ def simulate_agent_logs(start_dt: dt.datetime, end_dt: dt.datetime) -> pd.DataFr
             })
     return pd.DataFrame(rows).sort_values("timestamp")
 
-def load_or_simulate(csv_path: Path, generator, start_dt: dt.datetime, end_dt: dt.datetime) -> pd.DataFrame:
-    if csv_path.exists():
+@st.cache_data(show_spinner=False)
+def read_csv_safe(path: Path) -> pd.DataFrame | None:
+    if not path.exists():
+        return None
+    for enc in ("utf-8", "utf-8-sig", "cp1256"):
         try:
-            df = pd.read_csv(csv_path)
-            # Basic normalization
-            if "timestamp" in df.columns:
-                df["timestamp"] = pd.to_datetime(df["timestamp"])
-                df = df[(df["timestamp"] >= start_dt) & (df["timestamp"] <= end_dt)]
-            return df
+            return pd.read_csv(path, encoding=enc)
         except Exception:
-            pass
+            continue
+    try:
+        return pd.read_csv(path)  # last attempt default
+    except Exception:
+        return None
+
+def load_or_simulate(csv_path: Path, generator, start_dt: dt.datetime, end_dt: dt.datetime) -> pd.DataFrame:
+    df = read_csv_safe(csv_path)
+    if df is not None and not df.empty:
+        if "timestamp" in df.columns:
+            df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+            df = df.dropna(subset=["timestamp"])
+            df = df[(df["timestamp"] >= start_dt) & (df["timestamp"] <= end_dt)]
+        return df
     return generator(start_dt, end_dt)
 
 def rolling_zscore_anomalies(series: pd.Series, window: int, z_thresh: float, slope_thresh: float) -> pd.Series:
@@ -215,12 +220,14 @@ def gauge_plot(value: float, title: str, suffix: str = "", min_v=0, max_v=100):
     st.plotly_chart(fig, use_container_width=True)
 
 # -------------------------
-# Sidebar controls
+# Sidebar + Header
 # -------------------------
 render_center_header()  # centered header at page top
 
-st.sidebar.image(str(LOGO_PATH) if LOGO_PATH.exists() else None, width=90)
+# FIX: لا نستدعي image() إذا لم توجد الصورة
 st.sidebar.title("Agentra")
+if LOGO_PATH.exists():
+    st.sidebar.image(str(LOGO_PATH), width=90)
 st.sidebar.caption("Predictive Property Manager")
 
 data_source = st.sidebar.selectbox(
@@ -237,9 +244,17 @@ use_iforest = st.sidebar.checkbox("Advanced: IsolationForest", value=False)
 if use_iforest and not SKLEARN_AVAILABLE:
     st.sidebar.info("scikit-learn غير متاح في هذه البيئة. عطّلي الخيار أو أضيفيه إلى المتطلبات.")
 
-start_d, end_d = date_range_picker()
+def date_range_picker():
+    today = dt.date.today()
+    col1, col2 = st.sidebar.columns(2)
+    start = col1.date_input("From", today - dt.timedelta(days=6))
+    end = col2.date_input("To", today)
+    if start > end:
+        st.sidebar.warning("Start date is after end date. Swapping.")
+        start, end = end, start
+    return start, end
 
-# Map date to dt for filtering/simulation
+start_d, end_d = date_range_picker()
 start_dt = dt.datetime.combine(start_d, dt.time.min)
 end_dt = dt.datetime.combine(end_d, dt.time.max)
 
@@ -248,10 +263,21 @@ end_dt = dt.datetime.combine(end_d, dt.time.max)
 # -------------------------
 if data_source == "Historical Data":
     energy_df = load_or_simulate(CSV_ENERGY, simulate_energy, start_dt, end_dt)
+    # لو ملف التوفير موجود، نستبدل optimized_kwh منه:
+    saved_df = read_csv_safe(CSV_ENERGY_SAVED)
+    if saved_df is not None and "timestamp" in saved_df and "optimized_kwh" in saved_df:
+        saved_df["timestamp"] = pd.to_datetime(saved_df["timestamp"], errors="coerce")
+        saved_df = saved_df.dropna(subset=["timestamp"])
+        energy_df = energy_df.merge(
+            saved_df[["timestamp","optimized_kwh"]],
+            on="timestamp", how="left", suffixes=("","_alt")
+        )
+        energy_df["optimized_kwh"] = energy_df["optimized_kwh_alt"].fillna(energy_df["optimized_kwh"])
+        energy_df.drop(columns=[c for c in energy_df.columns if c.endswith("_alt")], inplace=True)
+
     pumps_df = load_or_simulate(CSV_PUMPS, simulate_pumps, start_dt, end_dt)
     logs_df = load_or_simulate(CSV_AGENT_LOG, simulate_agent_logs, start_dt, end_dt)
 elif data_source == "Predictive Model":
-    # Predictive = more savings + slightly different ranges
     energy_df = simulate_energy(start_dt, end_dt)
     energy_df["optimized_kwh"] *= np.random.uniform(0.68, 0.85)
     pumps_df = simulate_pumps(start_dt, end_dt)
@@ -277,6 +303,7 @@ energy_df["anomaly_energy"] = rolling_zscore_anomalies(
 energy_df["anomaly_vibration"] = rolling_zscore_anomalies(
     energy_df["vibration_mm_s"], roll_win, z_score, slope
 )
+
 pump_cols = ["efficiency_pct","vibration_mm_s","temperature_c","current_a","power_kw"]
 pumps_df["anomaly_eff"] = rolling_zscore_anomalies(
     pumps_df["efficiency_pct"], roll_win, z_score, slope
@@ -514,7 +541,6 @@ with tabs[3]:
         st.bar_chart(sev_df)
 
     st.markdown("#### Agent Interventions Timeline")
-    # Build timeline by hour & agent
     if "timestamp" in logs_df and "agent" in logs_df:
         tl = logs_df.copy()
         tl["hour"] = tl["timestamp"].dt.floor("H")
@@ -532,7 +558,7 @@ with tabs[3]:
     show_cols = ["timestamp","agent","action","target","severity","decision","status"]
     show_cols = [c for c in show_cols if c in logs_df.columns]
     st.dataframe(logs_df[show_cols].sort_values("timestamp", ascending=False), use_container_width=True, height=320)
-    colx1, colx2 = st.columns([0.2, 0.8])
+    colx1, _ = st.columns([0.2, 0.8])
     with colx1:
         if st.button("Export CSV"):
             st.download_button(
